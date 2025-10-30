@@ -2,6 +2,63 @@
 
 符号突触 + 结构可塑性 的大规模脉冲网络（无梯度训练，支持固定点模式）
 
+## 规格与约定
+
+- 项目名：`symbolicplastic_snn`
+- 默认技术栈：Python 3.11 + NumPy（纯 CPU，便于快速集成与测试；后续可替换为 C++/Rust 内核）
+- 依赖约束：仅允许 `numpy`、`pytest`；禁止其他外部依赖
+- 代码风格：PEP8 + 类型标注 + `dataclasses`，纯函数优先
+- 统一 PRNG：`xorshift64*`（内置实现），相同 seed + 相同输入 → 完全确定性
+- 固定点默认格式：
+  - 膜电位 `v`、阈值 `θ`：`int16`（Q4.11）
+  - 泄露 `λ`：`uint16`（Q1.15）
+  - 事件累加：`int32`
+  - 概率：`uint16`（Q0.16）
+
+模块布局（逐步填充）：
+
+```
+symbolicplastic_snn/
+  __init__.py
+  core/lif_fixedpoint.py
+  schedule/timewheel.py
+  conn/alias.py
+  conn/permute.py
+  realtime/budgeter.py
+  plasticity/stats.py
+  plasticity/update.py
+  readout/readout.py
+  io/config.py
+  io/snapshot.py
+  encode/input_encoders.py
+  runner/loop.py
+tests/
+  ...（与模块一一对应）
+```
+
+统一 PRNG（xorshift64*）说明：
+
+- 内置实现，所有随机过程（拓扑、别名采样、抖动等）统一调用；确保相同 seed + 相同输入下完全确定性。
+- 参考实现（Python 伪代码）：
+
+```python
+from typing import Iterator
+
+def xorshift64star(seed: int) -> Iterator[int]:
+    """64-bit xorshift* PRNG, returns 64-bit unsigned integers.
+    Multiplier 0x2545F4914F6CDD1D is the Marsaglia suggested constant.
+    """
+    x = seed & 0xFFFFFFFFFFFFFFFF
+    if x == 0:
+        x = 0x9E3779B97F4A7C15  # avoid zero lock
+    while True:
+        x ^= (x >> 12) & 0xFFFFFFFFFFFFFFFF
+        x ^= (x << 25) & 0xFFFFFFFFFFFFFFFF
+        x ^= (x >> 27) & 0xFFFFFFFFFFFFFFFF
+        y = (x * 0x2545F4914F6CDD1D) & 0xFFFFFFFFFFFFFFFF
+        yield y
+```
+
 ## 概述
 
 目标：在不使用实值权重或偏置、仅依赖连接的存在与符号（±1）、阈值与不应期的前提下，实现可扩展、稳定、可训练（无反向梯度）的脉冲神经网络。
@@ -23,10 +80,10 @@
 
 ## 快速开始
 
-- 环境：Python 3.10+。
+- 环境：Python 3.11 + NumPy（纯 CPU）。
 - 运行全部测试：`python -m unittest -v`（仓库根目录）。
 - 运行指定测试：`python -m unittest tests/test_simulator.py -v`。
-- 可选：配置加载支持 YAML，安装 `pyyaml`：`python -m pip install pyyaml`。
+- 使用 `pytest`（可选）：`pytest -q` 或 `pytest tests/test_simulator.py -q`。
 
 项目结构与导入（无需打包，直接从仓库根导入）：
 
@@ -110,10 +167,9 @@ ref_i(t+1) = tau_ref if s_i(t) = 1 else max(0, ref_i(t) - 1)
 将推理/读出/结构可塑性/采样统一为整数/定点运算，替代浮点乘加：
 
 - 数值格式建议：
-  - 膜电位 `v`、阈值 `theta`：`int16`（Q4.11 或 Q3.12），配全局缩放 `S_v`。
-  - 泄露 `lambda`：`uint16`（Q1.15）或移位近似（`v -= v >> p`）。
-  - 不应期：`uint8` 步计数；事件计数/读出计数按规模 `uint16/uint32`。
-  - STDP 相关 `corr`：`int16/32` 饱和加 + 位移衰减；概率/CDF：`uint16`（Q0.16）。
+  - 默认：`v, θ` 为 `int16`（Q4.11）；`λ` 为 `uint16`（Q1.15）；事件累加 `int32`；概率为 `uint16`（Q0.16）。
+  - 不应期：`uint8` 步计数；读出/计数按规模选 `uint16` 或 `uint32`。
+  - STDP 相关 `corr`：`int16/32` 饱和加 + 位移衰减；
   - 延迟 LUT：`uint8`（0–255 步）。
 - 泄露实现：`v = ((lambda_q15 * v) >> 15) + I`；或 `v -= (v >> p) + I`（近似 `lambda ≈ 1 - 2^(-p)`）。
 - 量化标定：估计 `W_eff ≈ 1/(1 - lambda)` 与输入方差，设定 `S_v` 与 `theta` 使非触发噪声下误触发率可控。
@@ -163,6 +219,8 @@ if ((step % decay_period) == 0) corr -= (corr >> decay_shift);
 ```
 
 ## 示例配置（YAML）
+
+（仅作示意；实际实现不引入 YAML 依赖，可使用内置 JSON/最小配置解析）
 
 ```yaml
 time:
@@ -233,10 +291,10 @@ readout:
 
 ## 项目结构与开发
 
-- 结构：`core/`, `topology/`, `plasticity/`, `monitor/`, `readout/`, `config/`, `tests/`。
-- 导入：从仓库根目录直接导入模块，例如 `from core.simulator import EventDrivenLIF`。
-- 测试：`python -m unittest -v`；单测新增放在 `tests/test_*.py` 下，使用 `unittest.TestCase`。
-- 配置：支持 JSON/YAML；不信任的配置文件请谨慎使用（建议优先 JSON）。
+- 新版包路径：`symbolicplastic_snn/`（逐步填充；与 `tests/` 一一对应）。
+- 导入示例：`from symbolicplastic_snn.core.lif_fixedpoint import ...`。
+- 测试：推荐 `pytest -q`（也兼容 `python -m unittest -v` 视测试风格而定）。
+- 配置：不引入外部依赖，使用内置 JSON/最小配置解析；YAML 示例仅为文档说明。
 
 ## 许可证与免责声明
 
@@ -245,4 +303,3 @@ readout:
 ## 一句话总结
 
 在“仅符号突触 + 阈值 + 不应期”的约束下，距离驱动的小世界拓扑配合无梯度的结构可塑性，即可支撑大规模、稳定、可学习的 SNN。开启固定点训练模式（Q 格式、整数 STDP/采样、饱和算术），按“σ 法则”设定 `theta`、以 `tau_ref` 抑爆，再以“生长‑剪枝‑稳态”在线更新结构，即可把系统跑稳、跑快、跑大。
-
