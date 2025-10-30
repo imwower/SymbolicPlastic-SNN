@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Callable, Tuple
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -225,5 +226,23 @@ __all__ = [
     "build_alias",
     "sample_alias",
     "reweight_alias",
+    "AliasForTile",
 ]
 
+
+@dataclass
+class AliasForTile:
+    """Container for alias table of post-tile sampling.
+
+    prob: uint16 thresholds per tile
+    alias: int32 alias indices
+    """
+
+    prob: np.ndarray
+    alias: np.ndarray
+
+    def __post_init__(self) -> None:
+        if self.prob.dtype != np.uint16:
+            self.prob = self.prob.astype(np.uint16, copy=False)
+        if self.alias.dtype != np.int32:
+            self.alias = self.alias.astype(np.int32, copy=False)
