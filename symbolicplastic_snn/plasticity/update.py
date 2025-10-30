@@ -147,5 +147,74 @@ def reweight_alias_smallstep(
     return np.clip(out, 0, 65535).astype(np.uint16)
 
 
-__all__ = ["reweight_alias_smallstep"]
+_MASK64 = (1 << 64) - 1
 
+
+def _hash64(x: int) -> int:
+    """SplitMix64-style 64-bit mixing. Deterministic and platform independent."""
+    z = (int(x) + 0x9E3779B97F4A7C15) & _MASK64
+    z ^= (z >> 30)
+    z = (z * 0xBF58476D1CE4E5B9) & _MASK64
+    z ^= (z >> 27)
+    z = (z * 0x94D049BB133111EB) & _MASK64
+    z ^= (z >> 31)
+    return z & _MASK64
+
+
+def reseed_small_fraction(
+    seeds_core: np.ndarray,
+    seeds_flex: np.ndarray,
+    low_contrib_mask: np.ndarray,
+    rate: float,
+    epoch: int,
+) -> None:
+    """Reseed a small fraction of exploration seeds based on low contributions.
+
+    - Only indices where low_contrib_mask is True are considered.
+    - Deterministically select approximately `rate` fraction using a 64-bit hash of
+      (seeds_core, seeds_flex, index, epoch) and compare to a threshold.
+    - For selected indices: seeds_flex[i] ^= hash64(epoch)
+
+    Mutates seeds_flex in-place. seeds_core is not modified.
+    """
+    sc = np.asarray(seeds_core, dtype=np.uint64)
+    sf = np.asarray(seeds_flex, dtype=np.uint64)
+    mask = np.asarray(low_contrib_mask, dtype=bool)
+    if sc.shape[0] != sf.shape[0] or sc.shape[0] != mask.shape[0]:
+        raise ValueError("seeds_core, seeds_flex, and low_contrib_mask must have same length")
+
+    n = sc.shape[0]
+    if n == 0:
+        return
+
+    r = float(rate)
+    if r <= 0.0:
+        return
+    if r >= 1.0:
+        # All eligible change deterministically
+        sel = mask
+    else:
+        # Deterministic per-index selection via hash mapping to [0, 2^64)
+        idx = np.arange(n, dtype=np.uint64)
+        # Compose a mixed value using 64-bit wrapping arithmetic
+        e = np.uint64(epoch) * np.uint64(0xC2B2AE3D27D4EB4F)
+        mixed = (sc ^ sf ^ (idx * np.uint64(0xD1342543DE82EF95)) ^ e).astype(np.uint64)
+        # Apply hash64 elementwise
+        # Vectorize via Python since np.vectorize returns object arrays; use list comprehension
+        mixed_h = np.fromiter((_hash64(int(v)) for v in mixed), count=n, dtype=np.uint64)
+        # Threshold for rate
+        threshold = np.uint64(int(r * (1 << 64)))
+        sel = mask & (mixed_h < threshold)
+
+    if not np.any(sel):
+        return
+
+    # Compute epoch hash once
+    eph = np.uint64(_hash64(int(epoch)))
+    sf[sel] = (sf[sel] ^ eph).astype(np.uint64)
+
+    # Write back to the original array in-place
+    seeds_flex[...] = sf
+
+
+__all__ = ["reweight_alias_smallstep", "reseed_small_fraction"]
