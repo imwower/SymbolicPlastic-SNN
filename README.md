@@ -276,8 +276,42 @@ readout:
   - 先把 `tau_ref` 提到 5–8 ms；剪短延迟 E↔E；提高抑制入度或降低长程比例；仍不稳再小幅增 `theta`。
 - 固定点会影响精度吗？
   - 采用 Q4.11/Q3.12 + 饱和算术 + σ 法则标定，在事件合并/低发放率场景下通常与浮点效果接近；若不够，提升位宽或减小缩放。
-- 读出必须无梯度吗？
+  - 读出必须无梯度吗？
   - 是的；若允许，可在只读出层用感知机规则（仍无反传）提升样本效率。
+
+## 快速开始（Quickstart）
+
+下面示例构建一个小规模网络并运行 1000 步，打印每步读出与实时指标（预算占用、延后事件等）。
+
+命令行运行
+
+```
+python scripts/run_local.py --steps 1000 --config examples/minimal.yml
+```
+
+其中 `examples/minimal.yml` 可为如下最小配置（支持 JSON 或最小 YAML）：
+
+```yaml
+time:
+  dt_ms: 1
+  tau_m_ms: 50
+  refractory_ms: 3
+topology:
+  K_in: 64
+  EI_ratio: 1.0
+  long_range_ratio: 0.1
+readout:
+  window_steps: 200
+```
+
+脚本将打印如下字段：
+
+- step: 步号（从 0 开始）
+- spikes: 当步触发的脉冲数
+- used_budget / deferred: 已用预算 / 延后事件数量
+- label / latency: 读出预测标签与首达延迟（若未锁存则为 -1）
+
+也可在不提供配置文件时直接运行，脚本会使用内置默认参数与随机输入样本。
 
 ## 默认超参速查表
 

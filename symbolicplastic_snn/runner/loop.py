@@ -304,6 +304,7 @@ class SnnRunner:
             "quota_explore_tiles": locals().get("quota_explore_tiles", 0),
             "emitted_core_events": locals().get("emitted_core", 0),
             "emitted_explore_events": locals().get("emitted_explore", 0),
+            "spikes_count": int(spikes.sum()) if spikes.size else 0,
         }
         return out
 
