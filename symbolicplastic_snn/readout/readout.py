@@ -1,0 +1,164 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict, List, Tuple
+
+import numpy as np
+
+
+@dataclass
+class ReadoutConfig:
+    window: int = 200
+    early_exit: bool = True
+    max_future_gain_ratio: float = 0.3
+    # Optional WTA (lateral inhibition) settings
+    wta: bool = False
+    wta_threshold: int = 1
+    wta_inhibit: int = 1
+
+
+class Readout:
+    """Sliding-window spike count readout with optional early-exit.
+
+    - Channels are added via add_channel(name, neuron_ids)
+    - step(spike_mask) updates per-channel counts in a rolling window
+    - can_early_exit(budget_remaining) decides if current leader is safe
+    - emit() returns current label, scores, and latency (first-winning step)
+
+    Deterministic and vectorized over NumPy arrays.
+    """
+
+    def __init__(self, cfg: ReadoutConfig | None = None) -> None:
+        self.cfg = cfg or ReadoutConfig()
+        if self.cfg.window <= 0:
+            raise ValueError("window must be positive")
+
+        self._names: List[str] = []
+        self._ids: List[np.ndarray] = []
+
+        self._win = int(self.cfg.window)
+        self._hist = None  # shape (C, window) int32
+        self._ptr = 0
+        self._counts = None  # shape (C,) int32 current sums
+        self._step_idx = 0  # 1-based steps processed counter
+
+        # For early-exit estimation: Sum of total channel spikes across steps
+        self._total_channel_spikes_accum = 0
+
+        # Latching for earliest-time-wins
+        self._latched_idx: int | None = None
+        self._latency: int | None = None
+
+    # ------------- Public API -------------
+    def add_channel(self, name: str, neuron_ids: np.ndarray) -> None:
+        ids = np.asarray(neuron_ids, dtype=np.int32)
+        self._names.append(str(name))
+        self._ids.append(ids)
+        self._ensure_buffers()
+
+    def step(self, spike_mask: np.ndarray) -> None:
+        if not self._names:
+            return
+        sm = np.asarray(spike_mask, dtype=bool)
+        C = len(self._names)
+
+        # Count spikes per channel for this step
+        step_counts = np.zeros(C, dtype=np.int32)
+        for c, ids in enumerate(self._ids):
+            if ids.size == 0:
+                continue
+            step_counts[c] = int(np.count_nonzero(sm[ids]))
+
+        # Optional WTA: channels with count >= threshold inhibit others in this step
+        if self.cfg.wta:
+            thr = int(self.cfg.wta_threshold)
+            inh = int(self.cfg.wta_inhibit)
+            winners = np.nonzero(step_counts >= thr)[0]
+            if winners.size > 0 and inh > 0:
+                # Total inhibition proportional to sum of winners' counts
+                total_inh = int(step_counts[winners].sum()) * inh
+                if total_inh > 0:
+                    for c in range(C):
+                        if c in winners:
+                            continue
+                        step_counts[c] = max(0, int(step_counts[c]) - total_inh)
+
+        # Update ring buffer and counts
+        old = self._hist[:, self._ptr].copy()
+        self._hist[:, self._ptr] = step_counts
+        self._counts = self._counts + (step_counts - old)
+        self._ptr = (self._ptr + 1) % self._win
+        self._step_idx += 1
+
+        # Update stats for early-exit
+        self._total_channel_spikes_accum += int(step_counts.sum())
+
+        # Latch earliest-time-wins: if nothing latched yet and someone fired now
+        if self._latched_idx is None:
+            pos = np.nonzero(step_counts > 0)[0]
+            if pos.size > 0:
+                # Pick the channel with largest count this step; tie -> lowest index
+                best = int(pos[np.argmax(step_counts[pos])])
+                self._latched_idx = best
+                self._latency = self._step_idx  # 1-based steps
+
+    def can_early_exit(self, budget_remaining: int) -> bool:
+        if not self.cfg.early_exit:
+            return False
+        if not self._names:
+            return False
+        if self._latched_idx is not None:
+            # We already have a committed winner; can exit
+            return True
+
+        # Ensure counts are available
+        counts = self._counts if self._counts is not None else np.zeros(0, dtype=np.int32)
+        if counts.size == 0:
+            return False
+        # Need two best to compute leading gap
+        order = np.argsort(counts)
+        best = counts[order[-1]]
+        second = counts[order[-2]] if counts.size >= 2 else 0
+        delta = int(best) - int(second)
+
+        # Estimate expected future gain bound
+        steps = max(1, self._step_idx)
+        p_to_readout = self._total_channel_spikes_accum / float(steps)
+        U = float(budget_remaining) * float(self.cfg.max_future_gain_ratio) * float(p_to_readout)
+        return delta > U
+
+    def emit(self) -> Dict[str, object]:
+        C = len(self._names)
+        if C == 0:
+            return {"label": "", "scores": {}, "latency": -1}
+
+        counts = self._counts.astype(int)
+
+        if self._latched_idx is not None:
+            label_idx = self._latched_idx
+            latency = int(self._latency if self._latency is not None else -1)
+        else:
+            label_idx = int(np.argmax(counts))
+            latency = -1
+
+        scores = {self._names[i]: int(counts[i]) for i in range(C)}
+        return {"label": self._names[label_idx], "scores": scores, "latency": latency}
+
+    # ------------- Internal -------------
+    def _ensure_buffers(self) -> None:
+        C = len(self._names)
+        if self._hist is None:
+            self._hist = np.zeros((C, self._win), dtype=np.int32)
+            self._counts = np.zeros(C, dtype=np.int32)
+            self._ptr = 0
+            return
+
+        # Expand buffers to accommodate new channels (append new rows)
+        curC = self._hist.shape[0]
+        if C > curC:
+            add = C - curC
+            self._hist = np.vstack([self._hist, np.zeros((add, self._win), dtype=np.int32)])
+            self._counts = np.concatenate([self._counts, np.zeros(add, dtype=np.int32)])
+
+
+__all__ = ["ReadoutConfig", "Readout"]
