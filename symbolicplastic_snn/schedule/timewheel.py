@@ -204,6 +204,27 @@ class TimeWheel:
         new_total = self._bytes_used + max(0, int(diff_bytes))
         return new_total > int(self._bytes_cap)
 
+    # ---------------- Convenience ----------------
+    def defer_to_future(self, events: Iterable[BlockEvent], extra_delay: int = 1) -> int:
+        """Defer events by increasing their delay deterministically and pushing.
+
+        Returns number of events deferred. Arrays are merged per existing policy in push().
+        """
+        cnt = 0
+        d = max(1, int(extra_delay))
+        for ev in events:
+            be = BlockEvent(
+                post_tile=int(ev.post_tile),
+                indices=np.array(ev.indices, dtype=np.int32, copy=True),
+                k=np.array(ev.k, dtype=np.int16, copy=True),
+                delay=int(ev.delay) + d,
+                capped=bool(ev.capped),
+                total_k=np.int64(ev.total_k),
+            )
+            self.push(be)
+            cnt += 1
+        return cnt
+
 
 def normalize_block_event(event: BlockEvent) -> BlockEvent:
     """Return a normalized copy of BlockEvent with constraints enforced.
@@ -265,4 +286,3 @@ def _merge_indices_k(
     # Saturate to int16 and ensure k >= 1
     sums = np.clip(sums, 1, 32767).astype(np.int16, copy=False)
     return uniq.astype(np.int32, copy=False), sums
-
