@@ -22,13 +22,13 @@ class ConfigFp:
       leak and refractory behavior.
     """
 
-    refractory_steps: int
+    refractory_steps: int = 6
     q_v_theta: str = "Q4.11"
     lambda_q15: bool = True
     v_reset: int = 0
 
 
-def saturating_add_int16(x: np.ndarray) -> np.ndarray:
+def saturating_int16(x: np.ndarray) -> np.ndarray:
     """Saturate an int32 array to int16 range [-32768, 32767].
 
     Parameters
@@ -39,9 +39,9 @@ def saturating_add_int16(x: np.ndarray) -> np.ndarray:
 
     Examples
     >>> import numpy as np
-    >>> from symbolicplastic_snn.core.lif_fixedpoint import saturating_add_int16
+    >>> from symbolicplastic_snn.core.lif_fixedpoint import saturating_int16
     >>> arr = np.array([40000, -50000, 123], dtype=np.int32)
-    >>> saturating_add_int16(arr)
+    >>> saturating_int16(arr)
     array([ 32767, -32768,    123], dtype=int16)
     """
 
@@ -52,7 +52,7 @@ def saturating_add_int16(x: np.ndarray) -> np.ndarray:
     return x64.astype(np.int16, copy=False)
 
 
-def q15_mul_shift(a: np.ndarray, lam: np.ndarray | int) -> np.ndarray:
+def q15_mul_round(a: np.ndarray, lam: np.ndarray | int) -> np.ndarray:
     """Multiply int16 `a` by Q1.15 `lam` with rounding, return int16.
 
     Computes round((a * lam) / 2^15) using symmetric rounding.
@@ -67,10 +67,10 @@ def q15_mul_shift(a: np.ndarray, lam: np.ndarray | int) -> np.ndarray:
 
     Examples
     >>> import numpy as np
-    >>> from symbolicplastic_snn.core.lif_fixedpoint import q15_mul_shift
+    >>> from symbolicplastic_snn.core.lif_fixedpoint import q15_mul_round
     >>> a = np.array([1000, -1000], dtype=np.int16)
     >>> lam = np.uint16(16384)  # ~0.5 in Q1.15
-    >>> q15_mul_shift(a, lam)
+    >>> q15_mul_round(a, lam)
     array([ 500, -500], dtype=int16)
     """
 
@@ -78,10 +78,11 @@ def q15_mul_shift(a: np.ndarray, lam: np.ndarray | int) -> np.ndarray:
         raise TypeError("a must be int16 ndarray")
     # Ensure broadcasting and integer precision during intermediate ops.
     prod = a.astype(np.int32) * np.asarray(lam, dtype=np.uint16).astype(np.int32)
+    # Round to nearest (ties away from zero) using bias depending on sign
     bias = np.where(prod >= 0, 1 << 14, (1 << 14) - 1).astype(np.int32)
     shifted = (prod + bias) >> 15
-    # In practice result fits int16; still clip for safety.
-    return saturating_add_int16(shifted.astype(np.int32))
+    # Saturate to int16 for safety (though range usually fits)
+    return saturating_int16(shifted.astype(np.int32))
 
 
 def lif_step(
@@ -162,14 +163,14 @@ def lif_step(
         I_act = I[active_mask]
 
         if cfg.lambda_q15:
-            leak = q15_mul_shift(v_act, np.uint16(lam_val)).astype(np.int32)
+            leak = q15_mul_round(v_act, np.uint16(lam_val)).astype(np.int32)
         else:
             # Shift approximation: v - (v >> p) with p chosen from lam; not specified
             # Keep deterministic fallback to q15 path for now (lambda_q15=True expected)
-            leak = q15_mul_shift(v_act, np.uint16(lam_val)).astype(np.int32)
+            leak = q15_mul_round(v_act, np.uint16(lam_val)).astype(np.int32)
 
         vv32 = leak + I_act
-        vv16 = saturating_add_int16(vv32)
+        vv16 = saturating_int16(vv32)
 
         # Spikes for active indices only
         spikes_act = vv16.astype(np.int32) >= np.int32(theta_val)
@@ -195,8 +196,7 @@ def lif_step(
 
 __all__ = [
     "ConfigFp",
-    "saturating_add_int16",
-    "q15_mul_shift",
+    "saturating_int16",
+    "q15_mul_round",
     "lif_step",
 ]
-

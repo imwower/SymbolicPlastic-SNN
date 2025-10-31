@@ -3,12 +3,12 @@ import numpy as np
 from symbolicplastic_snn.core.lif_fixedpoint import (
     ConfigFp,
     lif_step,
-    q15_mul_shift,
-    saturating_add_int16,
+    q15_mul_round,
+    saturating_int16,
 )
 
 
-def test_no_spike_when_ref():
+def test_refractory_masks_integration():
     n = 8
     v = np.full(n, 1234, dtype=np.int16)
     ref = np.full(n, 2, dtype=np.uint8)
@@ -27,13 +27,13 @@ def test_no_spike_when_ref():
     assert np.all(ref == 1)
 
 
-def test_spike_and_reset():
+def test_spike_and_reset_qformat():
     v = np.array([0, 0, 0], dtype=np.int16)
     ref = np.array([0, 0, 0], dtype=np.uint8)
     I = np.array([0, 30000, 10000], dtype=np.int32)
     theta = np.int16(20000)
     lam = np.uint16(32768)  # ~1.0
-    cfg = ConfigFp(refractory_steps=5, v_reset=0)
+    cfg = ConfigFp(v_reset=0)  # use default refractory_steps
 
     spikes, num = lif_step(v, ref, I, theta, lam, cfg)
 
@@ -42,13 +42,13 @@ def test_spike_and_reset():
     assert num == 1
     # Spike resets v to 0 and sets refractory
     assert v.tolist() == [0, 0, 10000]
-    assert ref.tolist() == [0, 5, 0]
+    assert ref.tolist() == [0, cfg.refractory_steps, 0]
 
 
-def test_saturation():
+def test_saturation_boundaries():
     # Directly test saturation helper
     arr = np.array([40000, -50000, 0, 32767, -32768], dtype=np.int32)
-    out = saturating_add_int16(arr)
+    out = saturating_int16(arr)
     assert out.dtype == np.int16
     assert out.tolist() == [32767, -32768, 0, 32767, -32768]
 
@@ -61,15 +61,15 @@ def test_saturation():
     cfg = ConfigFp(refractory_steps=3)
 
     # Compute vv16 independently to detect saturation effect before spike logic
-    vv16 = saturating_add_int16(q15_mul_shift(v, lam).astype(np.int32) + I)[0]
+    vv16 = saturating_int16(q15_mul_round(v, lam).astype(np.int32) + I)[0]
     assert vv16 == np.int16(32767)
 
 
-def test_leak_q15():
+def test_leak_q15_half():
     # lambda = 0.5 -> right shift by 1 approximately
     lam = np.uint16(16384)  # 0.5 in Q1.15
     v0 = np.array([1000, -1000], dtype=np.int16)
-    out = q15_mul_shift(v0, lam)
+    out = q15_mul_round(v0, lam)
     assert out.tolist() == [500, -500]
 
     # Through lif_step with zero I and no refractory
@@ -84,7 +84,7 @@ def test_leak_q15():
     assert v.tolist() == [500, -500]
 
 
-def test_determinism():
+def test_determinism_repeatability():
     rng_seed = 123
     n = 1024
     # Deterministic arrays (not random)
@@ -105,4 +105,3 @@ def test_determinism():
     assert np.array_equal(s1, s2)
     assert np.array_equal(v1, v2)
     assert np.array_equal(ref1, ref2)
-
