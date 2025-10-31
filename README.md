@@ -329,6 +329,8 @@ readout:
   - core_long_range_ratio, explore_long_range_ratio: 长程偏置比例（分配到最后四分之一 tiles）
   - near_radius: 近邻半径（tiles）；near_wrap: 是否采用环绕距离
   - ei_mapping_mode: E/I 划分模式（half/alternating/custom）；ei_tiles: 自定义 E tiles 列表
+  - preaggregate: 是否启用运行器 pending 事件预聚合（按 (post_tile, delay) 聚合，减少 push 数量）；默认 false，建议在事件量大或预算紧张时开启
+  - preaggregate_min_events: 触发预聚合的最小 pending 事件数阈值（默认 64）
 - stability_rules
   - forbid_short_EE_loops: 禁止短 E→E 回路
   - min_ee_delay: 短回路最小延迟

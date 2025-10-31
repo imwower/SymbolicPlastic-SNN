@@ -15,7 +15,13 @@ from symbolicplastic_snn.schedule.timewheel import BlockEvent, TimeWheel
 from symbolicplastic_snn.readout.readout import Readout, ReadoutConfig
 from symbolicplastic_snn.plasticity.stats import BitWindow, update_corr
 from symbolicplastic_snn.plasticity.update import reweight_alias_smallstep, reseed_small_fraction
-from symbolicplastic_snn.io.snapshot import save_snapshot, load_snapshot
+from symbolicplastic_snn.io.snapshot import (
+    save_snapshot,
+    load_snapshot,
+    save_runner_snapshot,
+    load_runner_snapshot,
+)
+from dataclasses import asdict
 
 
 @dataclass
@@ -509,22 +515,41 @@ class SnnRunner:
 
     # ---------------- Snapshot helpers ----------------
     def save_state(self, prefix: str) -> None:
-        # Save core-related state
-        core_alias = {"prob": self.alias_corr_prob, "alias": build_alias(self.alias_corr_prob)[1]}
-        save_snapshot(f"{prefix}_core.bin", self.v, self.ref, self.seeds_core, core_alias, {"mode": "core"})
-        explore_alias = {"prob": self.alias_corr_prob, "alias": build_alias(self.alias_corr_prob)[1]}
-        save_snapshot(f"{prefix}_explore.bin", self.v, self.ref, self.seeds_flex, explore_alias, {"mode": "explore"})
+        # Unified runner snapshot with arrays + metadata for full recovery
+        arrays = {
+            "v": self.v,
+            "ref": self.ref,
+            "seeds_core": self.seeds_core,
+            "seeds_flex": self.seeds_flex,
+            "alias_corr_prob": self.alias_corr_prob,
+            "corr_accum": self.corr_accum,
+            "tile_bw_hist": (self.tile_bw._hist if self.tile_bw._hist is not None else np.zeros(self.n_tiles, dtype=np.uint32)),
+            "spike_counts": self.spike_counts,
+        }
+        meta = {
+            "step_index": int(self._step_index),
+            "global_seed": int(self._global_seed),
+            "alias_version": int(self._alias_version),
+            "config": asdict(self.cfg),
+        }
+        save_runner_snapshot(f"{prefix}_runner.bin", arrays, meta)
 
     def load_state(self, prefix: str) -> None:
-        v, ref, seeds_core, alias_core, _ = load_snapshot(f"{prefix}_core.bin")
-        _, _, seeds_flex, alias_exp, _ = load_snapshot(f"{prefix}_explore.bin")
-        self.v = v.astype(np.int16)
-        self.ref = ref.astype(np.uint8)
-        self.seeds_core = seeds_core.astype(np.uint64)
-        self.seeds_flex = seeds_flex.astype(np.uint64)
-        # Restore corr-driven alias prob from snapshot
-        self.alias_corr_prob = alias_core["prob"].astype(np.uint16)
-        self._alias_version += 1
+        arrays, meta = load_runner_snapshot(f"{prefix}_runner.bin")
+        self.v = arrays["v"].astype(np.int16)
+        self.ref = arrays["ref"].astype(np.uint8)
+        self.seeds_core = arrays["seeds_core"].astype(np.uint64)
+        self.seeds_flex = arrays["seeds_flex"].astype(np.uint64)
+        self.alias_corr_prob = arrays["alias_corr_prob"].astype(np.uint16)
+        self.corr_accum = arrays.get("corr_accum", np.zeros(self.n_tiles, dtype=np.int32)).astype(np.int32)
+        if "tile_bw_hist" in arrays:
+            self.tile_bw._hist = arrays["tile_bw_hist"].astype(np.uint32)
+        self.spike_counts = arrays.get("spike_counts", np.zeros(self.N, dtype=np.int32)).astype(np.int32)
+        # Restore counters and seeds
+        self._step_index = int(meta.get("step_index", self._step_index))
+        self._global_seed = np.uint64(int(meta.get("global_seed", int(self._global_seed))))
+        self._alias_version = int(meta.get("alias_version", self._alias_version + 1))
+        # Invalidate caches to rebuild lazily
         self._alias_cache_core.clear()
         self._alias_cache_explore.clear()
 

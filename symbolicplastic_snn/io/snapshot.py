@@ -120,3 +120,67 @@ def load_snapshot(path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[s
 
 
 __all__ = ["save_snapshot", "load_snapshot"]
+
+
+def save_runner_snapshot(path: str, arrays: Dict[str, np.ndarray], meta: Dict[str, Any]) -> None:
+    """Save a generic runner snapshot with arbitrary named arrays and JSON metadata.
+
+    - arrays: mapping name -> numpy array (dtype/shape preserved)
+    - meta: free-form JSON-serializable dict (config, counters, etc.)
+    """
+    # Build segments description first without offsets
+    segments = [
+        {"name": name, "dtype": _dtype_str(arr.dtype), "shape": list(arr.shape)}
+        for name, arr in arrays.items()
+    ]
+    hdr = {"version": 1, "segments": segments, "meta": meta}
+    meta_json = json.dumps(hdr, separators=(",", ":")).encode("utf-8")
+    header = MAGIC + int.to_bytes(len(meta_json), 8, "little") + meta_json
+
+    # Compute sizes and offsets sequentially
+    sizes = [_nbytes(tuple(arr.shape), arr.dtype) for arr in arrays.values()]
+    offset = len(header)
+    offsets = []
+    for sz in sizes:
+        offsets.append(offset)
+        offset += sz
+
+    # Write full header (offsets derivable, not embedded)
+    with open(path, "wb") as f:
+        f.truncate(len(header) + sum(sizes))
+        f.seek(0)
+        f.write(header)
+
+    # Write arrays via memmap
+    for (name, arr), off in zip(arrays.items(), offsets):
+        mm = np.memmap(path, dtype=arr.dtype, mode="r+", offset=off, shape=arr.shape)
+        mm[...] = arr
+        mm.flush()
+        del mm
+
+
+def load_runner_snapshot(path: str) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
+    """Load arrays and metadata from a runner snapshot created by save_runner_snapshot."""
+    with open(path, "rb") as f:
+        magic = f.read(len(MAGIC))
+        if magic != MAGIC:
+            raise ValueError("Invalid snapshot magic header")
+        meta_len = int.from_bytes(f.read(8), "little")
+        meta_json = f.read(meta_len)
+    hdr = json.loads(meta_json.decode("utf-8"))
+    segs = hdr["segments"]
+    arrays: Dict[str, np.ndarray] = {}
+    # Offsets derive from header length + previous sizes
+    header_len = len(MAGIC) + 8 + len(meta_json)
+    off = header_len
+    for seg in segs:
+        name = str(seg["name"])
+        dt = np.dtype(seg["dtype"])  # type: ignore
+        shape = tuple(int(x) for x in seg["shape"])  # type: ignore
+        mm = np.memmap(path, dtype=dt, mode="r", offset=off, shape=shape)
+        arrays[name] = np.array(mm, copy=True)
+        del mm
+        off += _nbytes(shape, dt)
+    return arrays, hdr.get("meta", {})
+
+__all__.extend(["save_runner_snapshot", "load_runner_snapshot"])
