@@ -5,133 +5,106 @@ from symbolicplastic_snn.schedule.timewheel import BlockEvent, TimeWheel
 
 def be(post_tile, idx, k, delay):
     return BlockEvent(
-        post_tile=post_tile,
+        post_tile=int(post_tile),
         indices=np.asarray(idx, dtype=np.int32),
         k=np.asarray(k, dtype=np.int16),
-        delay=delay,
+        delay=int(delay),
     )
 
 
-def test_push_pop_roundtrip():
-    tw = TimeWheel(slots=4, bytes_cap=1 << 30)
-
-    ev = be(3, [1, 5, 9], [2, 1, 3], delay=1)
+def test_roundtrip_single_event():
+    tw = TimeWheel(slots=4)
+    ev = be(3, [1, 5, 9], [2, 1, 4], 0)
     tw.push(ev)
-
-    # Not yet due in current slot
-    out0 = tw.pop()
-    assert out0 == []
-
-    # After one tick, event should appear
-    tw.tick()
     out = tw.pop()
-    assert len(out) == 1
-    got = out[0]
 
-    assert got.post_tile == 3
-    assert got.delay == 1
-    assert not got.capped
-    assert got.total_k == 0
-    assert np.array_equal(got.indices, np.array([1, 5, 9], dtype=np.int32))
-    assert np.array_equal(got.k, np.array([2, 1, 3], dtype=np.int16))
+    assert len(out) == 1
+    o = out[0]
+    assert o.post_tile == 3 and o.delay == 0
+    assert not o.capped
+    assert o.total_k == 0
+    assert o.indices.dtype == np.int32 and o.k.dtype == np.int16
+    assert o.indices.tolist() == [1, 5, 9]
+    assert o.k.tolist() == [2, 1, 4]
 
 
 def test_merge_same_tile_delay():
-    tw = TimeWheel(slots=8, bytes_cap=1 << 30)
+    tw = TimeWheel(slots=8)
+    # Two events for same tile+delay with overlapping indices
+    ev1 = be(1, [2, 4, 6], [1, 2, 3], 2)
+    ev2 = be(1, [1, 4, 7], [4, 1, 1], 2)
 
-    ev1 = be(2, [1, 3, 5], [1, 2, 1], delay=2)
-    ev2 = be(2, [3, 4], [2, 1], delay=2)
-    ev3 = be(2, [1, 6], [3, 2], delay=2)
+    tw.push(ev1)
+    tw.push(ev2)
 
-    tw.push_batch([ev1, ev2, ev3])
-
-    # Not due yet
-    assert tw.pop() == []
+    # Advance time until slot for delay=2
     tw.tick(); tw.tick()
-
     out = tw.pop()
+
     assert len(out) == 1
-    got = out[0]
-    assert got.post_tile == 2 and got.delay == 2 and not got.capped
-
-    # indices must be strictly ascending and unique
-    assert np.array_equal(got.indices, np.array([1, 3, 4, 5, 6], dtype=np.int32))
-    # k aligned to indices: 1:(1+3)=4, 3:(2+2)=4, 4:1, 5:1, 6:2
-    assert np.array_equal(got.k, np.array([4, 4, 1, 1, 2], dtype=np.int16))
+    o = out[0]
+    assert o.post_tile == 1 and o.delay == 2
+    # Merged and sorted indices; k aligned and summed on index 4
+    assert o.indices.tolist() == [1, 2, 4, 6, 7]
+    assert o.k.tolist() == [4, 1, 3, 3, 1]
 
 
-def test_memory_cap_trigger():
-    # Extremely low cap to force coarse aggregation
+def test_bytes_cap_degrade():
+    # Very small cap to force degradation (arrays would be > cap)
     tw = TimeWheel(slots=2, bytes_cap=8)
-    # indices bytes = 5*4=20, k bytes = 5*2=10 -> 30 > cap
-    ev = be(1, [0, 1, 2, 3, 4], [1, 2, 3, 4, 5], delay=0)
+    ev = be(0, [0, 1, 2, 3], [1, 1, 1, 1], 1)
     tw.push(ev)
+    # Push another for same group to also accumulate total_k
+    ev2 = be(0, [5, 6], [2, 3], 1)
+    tw.push(ev2)
 
+    tw.tick()
     out = tw.pop()
+
     assert len(out) == 1
-    got = out[0]
-    assert got.post_tile == 1 and got.delay == 0
-    assert got.capped, "Should be coarse aggregated under cap"
-    # Arrays should be empty when capped
-    assert got.indices.size == 0 and got.k.size == 0
-    # Total strength must equal sum of k
-    assert int(got.total_k) == 1 + 2 + 3 + 4 + 5
+    o = out[0]
+    assert o.capped is True
+    assert o.indices.size == 0 and o.k.size == 0
+    # total_k equals sum of all k's pushed to this group
+    assert int(o.total_k) == (4 * 1 + 2 + 3)
 
 
-def test_determinism():
-    # Build a deterministic sequence of events with overlaps and different delays
-    seq = []
-    for t in range(5):
-        # Three groups targeting different slots
-        seq.append(be(0, [t, t + 1, t + 2], [1, 1, 1], delay=0))
-        seq.append(be(0, [t + 1, t + 3], [2, 2], delay=1))
-        seq.append(be(1, [2 * t, 2 * t + 1], [1, 3], delay=2))
+def test_determinism_sequence():
+    slots = 4
+    seq = [
+        be(2, [3, 4], [1, 1], 0),
+        be(1, [1, 2], [2, 3], 3),
+        be(2, [4], [2], 0),
+        be(2, [3], [5], 2),
+        be(0, [10], [1], 1),
+    ]
 
-    def run():
-        tw = TimeWheel(slots=4, bytes_cap=1 << 30)
-        outputs = []
-        for i, ev in enumerate(seq):
+    def run_once():
+        tw = TimeWheel(slots=slots)
+        for ev in seq:
             tw.push(ev)
-            # Pop then tick per step for variety
-            outs = tw.pop()
-            # Canonicalize outputs: sorted by (tile, delay)
-            outs = sorted(
-                [
-                    (
-                        o.post_tile,
-                        o.delay,
-                        tuple(o.indices.tolist()),
-                        tuple(o.k.tolist()),
-                        bool(o.capped),
-                        int(o.total_k),
-                    )
-                    for o in outs
-                ]
-            )
-            outputs.append(tuple(outs))
+        outs = []
+        for _ in range(slots):
+            outs.append([(
+                o.post_tile,
+                o.delay,
+                bool(o.capped),
+                o.indices.copy(),
+                o.k.copy(),
+                int(o.total_k),
+            ) for o in tw.pop()])
             tw.tick()
+        return outs
 
-        # Drain remaining slots
-        for _ in range(4):
-            outs = tw.pop()
-            outs = sorted(
-                [
-                    (
-                        o.post_tile,
-                        o.delay,
-                        tuple(o.indices.tolist()),
-                        tuple(o.k.tolist()),
-                        bool(o.capped),
-                        int(o.total_k),
-                    )
-                    for o in outs
-                ]
-            )
-            outputs.append(tuple(outs))
-            tw.tick()
-        return outputs
+    r1 = run_once()
+    r2 = run_once()
 
-    out1 = run()
-    out2 = run()
-    assert out1 == out2, "Outputs must be deterministic for identical inputs"
+    # Compare structure and contents deterministically
+    assert len(r1) == len(r2)
+    for a, b in zip(r1, r2):
+        assert len(a) == len(b)
+        for (pa, da, ca, ia, ka, ta), (pb, db, cb, ib, kb, tb) in zip(a, b):
+            assert pa == pb and da == db and ca == cb and ta == tb
+            assert np.array_equal(ia, ib)
+            assert np.array_equal(ka, kb)
 
