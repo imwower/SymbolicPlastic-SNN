@@ -313,6 +313,28 @@ readout:
 
 也可在不提供配置文件时直接运行，脚本会使用内置默认参数与随机输入样本。
 
+### 配置字段一览（摘选）
+
+- realtime
+  - budget_per_step: 每步预算（整型，事件处理成本上限）
+  - early_exit: 是否启用读出提前终止
+- fixed_point
+  - refractory_steps: LIF 不应期步数
+- plasticity
+  - period: 可塑性周期（步）
+  - lr_num, lr_den: 别名重权学习率（整数分数）
+  - corr_decay_period, corr_decay_shift: 相关度衰减配置（按周期 corr -= corr >> shift）
+- connectivity
+  - core_ratio, explore_ratio: 核心/探索配额比例
+  - core_long_range_ratio, explore_long_range_ratio: 长程偏置比例（分配到最后四分之一 tiles）
+  - near_radius: 近邻半径（tiles）；near_wrap: 是否采用环绕距离
+  - ei_mapping_mode: E/I 划分模式（half/alternating/custom）；ei_tiles: 自定义 E tiles 列表
+- stability_rules
+  - forbid_short_EE_loops: 禁止短 E→E 回路
+  - min_ee_delay: 短回路最小延迟
+  - drop_short_EE: 短回路事件直接丢弃（否则提升到最小延迟）
+
+
 ## 默认超参速查表
 
 - 时间步 `Δt`：1 ms；膜常数 `tau_m`：20–50 ms（`lambda = exp(−Δt/tau_m)`）。

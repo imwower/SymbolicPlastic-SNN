@@ -3,27 +3,22 @@ from __future__ import annotations
 import numpy as np
 
 
-_SPLITMIX64_INC = 0x9E3779B97F4A7C15
-_SPLITMIX64_MUL1 = 0xBF58476D1CE4E5B9
-_SPLITMIX64_MUL2 = 0x94D049BB133111EB
 _MASK64 = (1 << 64) - 1
 
 
-def _splitmix64_next(state: int) -> tuple[int, int]:
-    """SplitMix64 generator step.
+def _xs64star_next(state: int) -> tuple[int, int]:
+    """xorshift64* generator step.
 
     Returns (new_state, rand64) with 64-bit wrapping arithmetic.
-    Deterministic and platform-independent (pure Python ints with masking).
+    xorshift64*: x ^= x >> 12; x ^= x << 25; x ^= x >> 27; return x * 2685821657736338717.
     """
-    state = (state + _SPLITMIX64_INC) & _MASK64
-    z = state
-    z ^= (z >> 30)
-    z = (z * _SPLITMIX64_MUL1) & _MASK64
-    z ^= (z >> 27)
-    z = (z * _SPLITMIX64_MUL2) & _MASK64
-    z ^= (z >> 31)
-    z &= _MASK64
-    return state, z
+    x = state & _MASK64
+    x ^= (x >> 12) & _MASK64
+    x ^= ((x << 25) & _MASK64)
+    x ^= (x >> 27) & _MASK64
+    new_state = x & _MASK64
+    z = (new_state * 2685821657736338717) & _MASK64
+    return new_state, z
 
 
 def _u64_to_bounded(u: int, bound: int) -> int:
@@ -52,14 +47,14 @@ def permute_first_m(n: int, m: int, key: np.uint64 | int) -> np.ndarray:
 
     # Initialize array [0, 1, ..., n-1]
     arr = np.arange(n, dtype=np.int32)
-    # Initialize SplitMix64 state from key
+    # Initialize xorshift64* state from key
     if isinstance(key, np.generic):  # np.uint64 or similar
         state = int(key.item()) & _MASK64
     else:
         state = int(key) & _MASK64
 
     for i in range(m):
-        state, u = _splitmix64_next(state)
+        state, u = _xs64star_next(state)
         bound = n - i
         j = i + _u64_to_bounded(u, bound)
         # swap arr[i], arr[j]
@@ -74,4 +69,3 @@ def permute_first_m(n: int, m: int, key: np.uint64 | int) -> np.ndarray:
 __all__ = [
     "permute_first_m",
 ]
-

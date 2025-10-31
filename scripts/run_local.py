@@ -18,6 +18,58 @@ def cfg_from_dict(d: Dict[str, Any]) -> RunnerConfig:
         readout = d.get("readout", {})
         if "window_steps" in readout:
             rc.readout_window = int(readout["window_steps"])
+        # Optional realtime budget
+        if "realtime" in d and isinstance(d["realtime"], dict):
+            rt = d["realtime"]
+            if "budget_per_step" in rt:
+                rc.budget_per_step = int(rt["budget_per_step"])
+            if "early_exit" in rt:
+                rc.early_exit = bool(rt["early_exit"])
+        # Plasticity block
+        if "fixed_point" in d and isinstance(d["fixed_point"], dict):
+            fp = d["fixed_point"]
+            if "refractory_steps" in fp:
+                rc.refractory_steps = int(fp["refractory_steps"])
+        if "plasticity" in d and isinstance(d["plasticity"], dict):
+            pl = d["plasticity"]
+            if "period" in pl:
+                rc.plasticity_period = int(pl["period"])
+            if "lr_num" in pl:
+                rc.lr_num = int(pl["lr_num"])
+            if "lr_den" in pl:
+                rc.lr_den = int(pl["lr_den"])
+            if "corr_decay_period" in pl:
+                rc.corr_decay_period = int(pl["corr_decay_period"])
+            if "corr_decay_shift" in pl:
+                rc.corr_decay_shift = int(pl["corr_decay_shift"])
+        # Connectivity quotas
+        if "connectivity" in d and isinstance(d["connectivity"], dict):
+            cn = d["connectivity"]
+            if "core_ratio" in cn:
+                rc.core_ratio = float(cn["core_ratio"])
+            if "explore_ratio" in cn:
+                rc.explore_ratio = float(cn["explore_ratio"])
+            if "core_long_range_ratio" in cn:
+                rc.core_long_range_ratio = float(cn["core_long_range_ratio"])
+            if "explore_long_range_ratio" in cn:
+                rc.explore_long_range_ratio = float(cn["explore_long_range_ratio"])
+            if "near_radius" in cn:
+                rc.near_radius = int(cn["near_radius"])
+            if "near_wrap" in cn:
+                rc.near_wrap = bool(cn["near_wrap"])
+            if "ei_mapping_mode" in cn:
+                rc.ei_mapping_mode = str(cn["ei_mapping_mode"])  # 'half'|'alternating'|'custom'
+            if "ei_tiles" in cn and isinstance(cn["ei_tiles"], list):
+                rc.ei_tiles = [int(x) for x in cn["ei_tiles"]]
+        # Stability rules
+        if "stability_rules" in d and isinstance(d["stability_rules"], dict):
+            st = d["stability_rules"]
+            if "forbid_short_EE_loops" in st:
+                rc.stability_forbid_short_EE_loops = bool(st["forbid_short_EE_loops"])
+            if "min_ee_delay" in st:
+                rc.stability_min_ee_delay = int(st["min_ee_delay"])
+            if "drop_short_EE" in st:
+                rc.stability_drop_short_EE = bool(st["drop_short_EE"])
     except Exception:
         pass
     return rc
@@ -28,6 +80,8 @@ def main() -> None:
     ap.add_argument("--config", type=str, default=None, help="Path to YAML/JSON config (optional)")
     ap.add_argument("--steps", type=int, default=1000, help="Number of steps to run")
     ap.add_argument("--seed", type=int, default=1234, help="Random seed for inputs and runner")
+    ap.add_argument("--save-prefix", type=str, default=None, help="Optional prefix to save runner state (core/explore)")
+    ap.add_argument("--load-prefix", type=str, default=None, help="Optional prefix to load runner state before running")
     args = ap.parse_args()
 
     # Load config if provided
@@ -39,6 +93,11 @@ def main() -> None:
         rc = cfg_from_dict(cfg)
 
     runner = SnnRunner(rc, seed=args.seed)
+    if args.load_prefix:
+        try:
+            runner.load_state(args.load_prefix)
+        except Exception as e:
+            print(f"Warning: failed to load state: {e}")
 
     rng = np.random.default_rng(args.seed)
     for t in range(args.steps):
@@ -63,7 +122,9 @@ def main() -> None:
             )
         )
 
+    if args.save_prefix:
+        runner.save_state(args.save_prefix)
+
 
 if __name__ == "__main__":
     main()
-

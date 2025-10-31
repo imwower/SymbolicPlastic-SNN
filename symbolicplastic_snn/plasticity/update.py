@@ -150,15 +150,13 @@ def reweight_alias_smallstep(
 _MASK64 = (1 << 64) - 1
 
 
-def _hash64(x: int) -> int:
-    """SplitMix64-style 64-bit mixing. Deterministic and platform independent."""
-    z = (int(x) + 0x9E3779B97F4A7C15) & _MASK64
-    z ^= (z >> 30)
-    z = (z * 0xBF58476D1CE4E5B9) & _MASK64
-    z ^= (z >> 27)
-    z = (z * 0x94D049BB133111EB) & _MASK64
-    z ^= (z >> 31)
-    return z & _MASK64
+def _xs64star_mix(x: int) -> int:
+    """xorshift64* one-round mixer (deterministic)."""
+    z = int(x) & _MASK64
+    z ^= (z >> 12) & _MASK64
+    z ^= ((z << 25) & _MASK64)
+    z ^= (z >> 27) & _MASK64
+    return (z * 2685821657736338717) & _MASK64
 
 
 def reseed_small_fraction(
@@ -201,7 +199,7 @@ def reseed_small_fraction(
         mixed = (sc ^ sf ^ (idx * np.uint64(0xD1342543DE82EF95)) ^ e).astype(np.uint64)
         # Apply hash64 elementwise
         # Vectorize via Python since np.vectorize returns object arrays; use list comprehension
-        mixed_h = np.fromiter((_hash64(int(v)) for v in mixed), count=n, dtype=np.uint64)
+        mixed_h = np.fromiter((_xs64star_mix(int(v)) for v in mixed), count=n, dtype=np.uint64)
         # Threshold for rate
         threshold = np.uint64(int(r * (1 << 64)))
         sel = mask & (mixed_h < threshold)
@@ -210,7 +208,7 @@ def reseed_small_fraction(
         return
 
     # Compute epoch hash once
-    eph = np.uint64(_hash64(int(epoch)))
+    eph = np.uint64(_xs64star_mix(int(epoch)))
     sf[sel] = (sf[sel] ^ eph).astype(np.uint64)
 
     # Write back to the original array in-place

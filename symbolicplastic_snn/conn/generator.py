@@ -13,67 +13,42 @@ from symbolicplastic_snn.schedule.timewheel import BlockEvent
 
 JITTER_MAX = 3  # inclusive max added to LUT base delay
 _MASK64 = (1 << 64) - 1
-_SPLITMIX64_INC = 0x9E3779B97F4A7C15
-_SPLITMIX64_MUL1 = 0xBF58476D1CE4E5B9
-_SPLITMIX64_MUL2 = 0x94D049BB133111EB
 
 
-def _splitmix64_next(state: int) -> tuple[int, int]:
-    state = (state + _SPLITMIX64_INC) & _MASK64
-    z = state
-    z ^= (z >> 30)
-    z = (z * _SPLITMIX64_MUL1) & _MASK64
-    z ^= (z >> 27)
-    z = (z * _SPLITMIX64_MUL2) & _MASK64
-    z ^= (z >> 31)
-    z &= _MASK64
-    return state, z
+def _xs64star_next(state: int) -> tuple[int, int]:
+    x = state & _MASK64
+    x ^= (x >> 12) & _MASK64
+    x ^= ((x << 25) & _MASK64)
+    x ^= (x >> 27) & _MASK64
+    new_state = x & _MASK64
+    z = (new_state * 2685821657736338717) & _MASK64
+    return new_state, z
 
 
 def _rng_uint16_from_seed(seed: int):
     state = int(seed) & _MASK64
 
-    def rng(size: int) -> np.ndarray:
+    def rng_with_state(size: int) -> np.ndarray:
+        nonlocal state
         out = np.empty(size, dtype=np.uint16)
         s = state
         for i in range(size):
-            s, r = _splitmix64_next(s)
+            s, r = _xs64star_next(s)
             out[i] = np.uint16((r >> 48) & 0xFFFF)
-        # update outer scope state
-        nonlocal_state[0] = s
-        return out
-
-    # mutable wrapper to keep state across calls
-    nonlocal_state = [state]
-
-    def rng_with_state(size: int) -> np.ndarray:
-        s = nonlocal_state[0]
-        out = np.empty(size, dtype=np.uint16)
-        for i in range(size):
-            s, r = _splitmix64_next(s)
-            out[i] = np.uint16((r >> 48) & 0xFFFF)
-        nonlocal_state[0] = s
+        state = s
         return out
 
     return rng_with_state
 
 
 def _mix_key(pre_id: int, post_tile: int, step: int) -> int:
-    """Derive a deterministic 64-bit key from identifiers.
-
-    Pure Python 64-bit wrapping arithmetic to avoid platform casting issues.
-    """
+    """Derive a deterministic 64-bit key using xorshift64* mixing."""
     x = (int(pre_id) * 0xD1342543DE82EF95) & _MASK64
-    x = (x + ((int(post_tile) + 0x9E37) * 0xC2B2AE3D27D4EB4F)) & _MASK64
-    x = (x ^ (int(step) * 0x165667B19E3779F9)) & _MASK64
-    # Finalize similar to SplitMix64
-    z = x
-    z ^= (z >> 30)
-    z = (z * _SPLITMIX64_MUL1) & _MASK64
-    z ^= (z >> 27)
-    z = (z * _SPLITMIX64_MUL2) & _MASK64
-    z ^= (z >> 31)
-    return z & _MASK64
+    x ^= ((int(post_tile) + 0x9E37) * 0xC2B2AE3D27D4EB4F) & _MASK64
+    x ^= (int(step) * 0x165667B19E3779F9) & _MASK64
+    # One xorshift64* round for diffusion
+    _, z = _xs64star_next(x)
+    return z
 
 
 def gen_block_events(
@@ -109,9 +84,7 @@ def gen_block_events(
 
     # RNG for alias sampling and jitter, derived from seed + identifiers.
     seed_val = int(np.uint64(seed))
-    seed_mix = (
-        (seed_val ^ (pre_id * 0x9E3779B1)) ^ (pre_tile * 0xC2B2AE35) ^ (step * 0x165667B1)
-    ) & _MASK64
+    seed_mix = (seed_val ^ (pre_id * 0x9E3779B1) ^ (pre_tile * 0xC2B2AE35) ^ (step * 0x165667B1)) & _MASK64
     rng16 = _rng_uint16_from_seed(seed_mix)
 
     # 1) Sample post tiles
@@ -134,13 +107,10 @@ def gen_block_events(
     # For per-tile jitter, derive from RNG sequence by drawing one 64-bit value
     # via composing four 16-bit outputs for determinism.
     def next_jitter() -> int:
-        # Compose 64-bit from four uint16 draws
-        r0 = int(rng16(1)[0])
-        r1 = int(rng16(1)[0])
-        r2 = int(rng16(1)[0])
-        r3 = int(rng16(1)[0])
-        u64 = ((r0 << 48) | (r1 << 32) | (r2 << 16) | r3) & _MASK64
-        return int((u64 >> 61) & JITTER_MAX)
+        # Compose jitter from next PRN
+        r = int(rng16(1)[0])
+        # Expand to small jitter 0..JITTER_MAX using upper bits
+        return int((r >> 13) & JITTER_MAX)
 
     for post_tile in unique_tiles:
         q = int(quota[post_tile])

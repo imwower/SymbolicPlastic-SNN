@@ -3,24 +3,19 @@ import numpy as np
 from symbolicplastic_snn.conn.alias import build_alias, sample_alias, reweight_alias
 
 
-def _splitmix64_rng_uint16(seed: int):
+def _xs64star_rng_uint16(seed: int):
     MASK = (1 << 64) - 1
-    INC = 0x9E3779B97F4A7C15
-    MUL1 = 0xBF58476D1CE4E5B9
-    MUL2 = 0x94D049BB133111EB
-
+    MUL = 2685821657736338717
     state = int(seed) & MASK
 
     def next_u64():
         nonlocal state
-        state = (state + INC) & MASK
-        z = state
-        z ^= (z >> 30)
-        z = (z * MUL1) & MASK
-        z ^= (z >> 27)
-        z = (z * MUL2) & MASK
-        z ^= (z >> 31)
-        return z & MASK
+        x = state & MASK
+        x ^= (x >> 12) & MASK
+        x ^= ((x << 25) & MASK)
+        x ^= (x >> 27) & MASK
+        state = x & MASK
+        return (state * MUL) & MASK
 
     def rng(size: int) -> np.ndarray:
         out = np.empty(size, dtype=np.uint16)
@@ -55,7 +50,7 @@ def test_alias_sampling_frequency():
     n = 17
     w = _uniform_q016(n)
     prob, alias = build_alias(w)
-    rng = _splitmix64_rng_uint16(42)
+    rng = _xs64star_rng_uint16(42)
 
     n_samples = 40000
     samples = sample_alias(prob, alias, rng, n_samples)
@@ -83,4 +78,3 @@ def test_reweight_keep_sum():
     assert int(after.astype(np.uint32).sum()) == 65535
     assert after[3] > before[3]
     assert after[7] < before[7]
-
