@@ -44,29 +44,26 @@ class BlockEvent:
         if self.delay < 0:
             raise ValueError("delay must be non-negative")
 
-        # Enforce strictly increasing and unique indices, stable deterministic
+        # Enforce strictly increasing and unique indices with fast-path
         if self.indices.size:
-            order = np.argsort(self.indices, kind="mergesort")
-            idx = self.indices[order]
-            kk = self.k.astype(np.int32, copy=False)[order]
-
-            # Unique and sum duplicates
-            uniq, first_idx, counts = np.unique(idx, return_index=True, return_counts=True)
-            if uniq.size != idx.size:  # there are duplicates
-                sums = np.add.reduceat(kk, first_idx)
-                # Add contributions of following duplicates (counts>1)
-                dup_mask = counts > 1
-                if np.any(dup_mask):
-                    # For duplicates, reduceat already sums contiguous groups
-                    pass
-                kk_new = sums
+            idx = self.indices
+            kk = self.k.astype(np.int32, copy=False)
+            # Fast path: already strictly increasing -> only clamp k
+            if np.all(idx[1:] > idx[:-1]):
+                self.k = np.clip(kk, 1, 32767).astype(np.int16, copy=False)
             else:
-                kk_new = kk
-
-            # Clamp k to int16 range [1, 32767] and cast to int16
-            kk_new = np.clip(kk_new, 1, 32767).astype(np.int16, copy=False)
-            self.indices = uniq.astype(np.int32, copy=False)
-            self.k = kk_new
+                order = np.argsort(idx, kind="mergesort")
+                idx = idx[order]
+                kk = kk[order]
+                # Unique and sum duplicates
+                uniq, first_idx, counts = np.unique(idx, return_index=True, return_counts=True)
+                if uniq.size != idx.size:
+                    sums = np.add.reduceat(kk, first_idx)
+                    kk = sums
+                # Clamp and assign
+                kk = np.clip(kk, 1, 32767).astype(np.int16, copy=False)
+                self.indices = uniq.astype(np.int32, copy=False)
+                self.k = kk
 
 
 class TimeWheel:
@@ -262,8 +259,59 @@ def _merge_indices_k(
     - For duplicate indices, k are summed
     - k is saturated into int16 range [1, 32767]
     """
+    # Fast path if both are strictly increasing (most common): linear merge
+    def _is_incr(x: NDArray[np.int32]) -> bool:
+        return x.size == 0 or bool(np.all(x[1:] > x[:-1]))
+
+    if _is_incr(a_idx) and _is_incr(b_idx):
+        a_n = a_idx.size
+        b_n = b_idx.size
+        if a_n == 0:
+            return b_idx.astype(np.int32, copy=False), np.clip(b_k, 1, 32767).astype(np.int16, copy=False)
+        if b_n == 0:
+            return a_idx.astype(np.int32, copy=False), np.clip(a_k, 1, 32767).astype(np.int16, copy=False)
+        out_idx = np.empty(a_n + b_n, dtype=np.int32)
+        out_k = np.empty(a_n + b_n, dtype=np.int32)
+        ai = bi = oi = 0
+        a_ki = a_k.astype(np.int32, copy=False)
+        b_ki = b_k.astype(np.int32, copy=False)
+        while ai < a_n and bi < b_n:
+            av = int(a_idx[ai])
+            bv = int(b_idx[bi])
+            if av < bv:
+                out_idx[oi] = av
+                out_k[oi] = a_ki[ai]
+                ai += 1
+                oi += 1
+            elif av > bv:
+                out_idx[oi] = bv
+                out_k[oi] = b_ki[bi]
+                bi += 1
+                oi += 1
+            else:
+                out_idx[oi] = av
+                out_k[oi] = a_ki[ai] + b_ki[bi]
+                ai += 1
+                bi += 1
+                oi += 1
+        # Append remainders
+        if ai < a_n:
+            n = a_n - ai
+            out_idx[oi:oi+n] = a_idx[ai:]
+            out_k[oi:oi+n] = a_ki[ai:]
+            oi += n
+        if bi < b_n:
+            n = b_n - bi
+            out_idx[oi:oi+n] = b_idx[bi:]
+            out_k[oi:oi+n] = b_ki[bi:]
+            oi += n
+        out_idx = out_idx[:oi]
+        out_k = out_k[:oi]
+        out_k = np.clip(out_k, 1, 32767).astype(np.int16, copy=False)
+        return out_idx, out_k
+
+    # Fallback: concatenate, sort, unique + reduceat
     if a_idx.size == 0:
-        # Ensure normalization on the input
         if b_idx.size == 0:
             return a_idx, a_k
         order = np.argsort(b_idx, kind="mergesort")
@@ -279,10 +327,7 @@ def _merge_indices_k(
         order = np.argsort(idx, kind="mergesort")
         idx = idx[order]
         kk = kk[order]
-
-    # Unique indices and sum duplicates deterministically
-    uniq, first_idx, counts = np.unique(idx, return_index=True, return_counts=True)
+    uniq, first_idx, _ = np.unique(idx, return_index=True, return_counts=True)
     sums = np.add.reduceat(kk, first_idx)
-    # Saturate to int16 and ensure k >= 1
     sums = np.clip(sums, 1, 32767).astype(np.int16, copy=False)
     return uniq.astype(np.int32, copy=False), sums

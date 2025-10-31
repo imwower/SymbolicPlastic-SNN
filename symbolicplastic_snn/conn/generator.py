@@ -116,6 +116,8 @@ def gen_block_events(
         q = int(quota[post_tile])
         key = _mix_key(pre_id, int(post_tile), step)
         indices = permute_first_m(int(tile_size), int(M), key)
+        # Sort indices ascending to help downstream fast-path merging
+        indices = np.sort(indices, kind="mergesort")
 
         base_delay = 0
         if use_lut:
