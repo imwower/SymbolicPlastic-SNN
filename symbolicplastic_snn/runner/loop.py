@@ -57,6 +57,9 @@ class RunnerConfig:
     # E/I mapping for stability rules: 'half' | 'alternating' | 'custom'
     ei_mapping_mode: str = "half"
     ei_tiles: Optional[list[int]] = None
+    # Pending events pre-aggregation into (post_tile, delay) groups
+    preaggregate: bool = False
+    preaggregate_min_events: int = 64
 
 
 class SnnRunner:
@@ -224,32 +227,31 @@ class SnnRunner:
                     return 1
                 return 2
 
-            # Vectorized priority computation
+            # Optional pre-aggregation: group by (post_tile, delay) to reduce push count
+            if self.cfg.preaggregate and len(pending) >= int(self.cfg.preaggregate_min_events):
+                pending = self._preaggregate_pending(pending, leader_tiles)
+
+            # Vectorized priority computation (supports aggregated tuples with precomputed pri)
             if pending:
                 ev_arr = [p[0] for p in pending]
                 pre_arr = np.array([p[1] for p in pending], dtype=np.int32)
                 post_arr = np.array([ev.post_tile for ev in ev_arr], dtype=np.int32)
-                leader_mask = np.isin(post_arr, np.fromiter(leader_tiles, count=len(leader_tiles), dtype=np.int32)) if leader_tiles else np.zeros(len(ev_arr), dtype=bool)
-                dist = np.abs(post_arr - pre_arr)
-                if self.cfg.near_wrap:
-                    n = self.n_tiles
-                    dist = np.minimum(dist, n - dist)
-                pri_arr = np.where(leader_mask, 0, np.where(dist <= int(self.cfg.near_radius), 1, 2)).astype(np.int32)
-                order = np.argsort(pri_arr, kind="stable")
-                pending = [(ev_arr[i], int(pre_arr[i])) for i in order]
-
-            # Consume budget by priority order
-            for ev, pre_tile in pending:
-                cost = int(ev.indices.size)
-                # pri already computed; recompute cheaply for metrics
-                if ev.post_tile in leader_tiles:
-                    pri = 0
+                if len(pending[0]) >= 3:
+                    pri_arr = np.array([int(p[2]) for p in pending], dtype=np.int32)
                 else:
-                    d = abs(int(ev.post_tile) - int(pre_tile))
+                    leader_mask = np.isin(post_arr, np.fromiter(leader_tiles, count=len(leader_tiles), dtype=np.int32)) if leader_tiles else np.zeros(len(ev_arr), dtype=bool)
+                    dist = np.abs(post_arr - pre_arr)
                     if self.cfg.near_wrap:
                         n = self.n_tiles
-                        d = min(d, n - d)
-                    pri = 1 if d <= int(self.cfg.near_radius) else 2
+                        dist = np.minimum(dist, n - dist)
+                    pri_arr = np.where(leader_mask, 0, np.where(dist <= int(self.cfg.near_radius), 1, 2)).astype(np.int32)
+                order = np.argsort(pri_arr, kind="stable")
+                pending = [(ev_arr[i], int(pre_arr[i]), int(pri_arr[i])) for i in order]
+
+            # Consume budget by priority order
+            for item in pending:
+                ev, pre_tile, pri = (item if len(item) >= 3 else (item[0], item[1], 0))
+                cost = int(ev.indices.size)
                 if budget.allow(cost):
                     budget.charge(cost)
                     self.wheel.push(ev)
@@ -611,6 +613,45 @@ class SnnRunner:
         mask = np.zeros(n, dtype=bool)
         mask[:half] = True
         return mask
+
+    def _preaggregate_pending(self, pending: List[Tuple[BlockEvent, int]], leader_tiles: set[int]) -> List[Tuple[BlockEvent, int, int]]:
+        # Group by (post_tile, delay)
+        groups: dict[Tuple[int, int], dict] = {}
+        for ev, pre_tile in pending:
+            key = (int(ev.post_tile), int(ev.delay))
+            g = groups.get(key)
+            if g is None:
+                g = {
+                    "indices": [],
+                    "k": [],
+                    "pre_tiles": set(),
+                }
+                groups[key] = g
+            g["indices"].append(ev.indices)
+            g["k"].append(ev.k)
+            g["pre_tiles"].add(int(pre_tile))
+
+        out: List[Tuple[BlockEvent, int, int]] = []
+        for (post_tile, delay), g in groups.items():
+            idx = np.concatenate(g["indices"]) if g["indices"] else np.empty((0,), dtype=np.int32)
+            kk = np.concatenate(g["k"]) if g["k"] else np.empty((0,), dtype=np.int16)
+            # Let BlockEvent normalize (sort/unique/clip)
+            be = BlockEvent(post_tile=post_tile, indices=idx, k=kk, delay=delay)
+            # Compute group priority: P0 if post_tile in leader; else P1 if any pre near; else P2
+            if post_tile in leader_tiles:
+                pri = 0
+            else:
+                if g["pre_tiles"]:
+                    pre_vec = np.fromiter(g["pre_tiles"], dtype=np.int32)
+                    d = np.abs(pre_vec - int(post_tile))
+                    if self.cfg.near_wrap:
+                        n = self.n_tiles
+                        d = np.minimum(d, n - d)
+                    pri = 1 if int(d.min()) <= int(self.cfg.near_radius) else 2
+                else:
+                    pri = 2
+            out.append((be, post_tile, pri))
+        return out
 
 
 __all__ = ["RunnerConfig", "SnnRunner"]

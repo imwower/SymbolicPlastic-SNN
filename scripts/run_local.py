@@ -61,6 +61,10 @@ def cfg_from_dict(d: Dict[str, Any]) -> RunnerConfig:
                 rc.ei_mapping_mode = str(cn["ei_mapping_mode"])  # 'half'|'alternating'|'custom'
             if "ei_tiles" in cn and isinstance(cn["ei_tiles"], list):
                 rc.ei_tiles = [int(x) for x in cn["ei_tiles"]]
+            if "preaggregate" in cn:
+                rc.preaggregate = bool(cn["preaggregate"])
+            if "preaggregate_min_events" in cn:
+                rc.preaggregate_min_events = int(cn["preaggregate_min_events"])
         # Stability rules
         if "stability_rules" in d and isinstance(d["stability_rules"], dict):
             st = d["stability_rules"]
