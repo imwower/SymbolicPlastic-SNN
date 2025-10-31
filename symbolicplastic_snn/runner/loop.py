@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import numpy as np
 
 from symbolicplastic_snn.conn.alias import AliasForTile, build_alias
-from symbolicplastic_snn.conn.generator import gen_block_events
+from symbolicplastic_snn.conn.generator import gen_block_events, gen_block_events_batch
 from symbolicplastic_snn.core.lif_fixedpoint import ConfigFp, lif_step
 from symbolicplastic_snn.encode.input_encoders import rate_encode_q016
 from symbolicplastic_snn.realtime.budgeter import EventBudget
@@ -167,44 +167,48 @@ class SnnRunner:
                 quota_core_tiles += T_core
                 quota_explore_tiles += T_explore
 
+            # Batch generate events for all spiking pres in one go (core/explore)
+            if spk_idx.size:
+                pre_ids_vec = spk_idx.astype(np.int32)
+                pre_tiles_vec = (pre_ids_vec // self.tile_size).astype(np.int32)
+                # Core path
                 if T_core > 0:
-                    be_core = gen_block_events(
-                        pre_id=int(pre_id),
+                    alias_list_core = [self._get_alias_for(int(t), mode="core") for t in pre_tiles_vec]
+                    pairs_core = gen_block_events_batch(
+                        pre_ids=pre_ids_vec.tolist(),
                         step=self._step_index,
-                        pre_tile=int(pre_tile),
-                        alias_tbl=self._get_alias_for(pre_tile, mode="core"),
+                        pre_tiles=pre_tiles_vec.tolist(),
+                        alias_tbls=alias_list_core,
                         tile_size=self.tile_size,
                         T_tiles=T_core,
                         M=self.cfg.indices_per_event,
-                        seed=np.uint64(self.seeds_core[pre_id]),
+                        seeds=[int(self.seeds_core[int(pid)]) for pid in pre_ids_vec],
                         delay_lut=self.delay_lut,
-                        budget=None,
                     )
-                    emitted_core += len(be_core)
-                    for ev in be_core:
-                        # Stability: forbid short E->E loops by increasing delay
-                        ev2 = self._apply_stability_rules(ev, pre_tile)
+                    emitted_core += len(pairs_core)
+                    for ev, pt in pairs_core:
+                        ev2 = self._apply_stability_rules(ev, int(pt))
                         if ev2 is not None:
-                            pending.append((ev2, pre_tile))
-
+                            pending.append((ev2, int(pt)))
+                # Explore path
                 if T_explore > 0:
-                    be_explore = gen_block_events(
-                        pre_id=int(pre_id),
+                    alias_list_exp = [self._get_alias_for(int(t), mode="explore") for t in pre_tiles_vec]
+                    pairs_exp = gen_block_events_batch(
+                        pre_ids=pre_ids_vec.tolist(),
                         step=self._step_index,
-                        pre_tile=int(pre_tile),
-                        alias_tbl=self._get_alias_for(pre_tile, mode="explore"),
+                        pre_tiles=pre_tiles_vec.tolist(),
+                        alias_tbls=alias_list_exp,
                         tile_size=self.tile_size,
                         T_tiles=T_explore,
                         M=self.cfg.indices_per_event,
-                        seed=np.uint64(self.seeds_flex[pre_id]),
+                        seeds=[int(self.seeds_flex[int(pid)]) for pid in pre_ids_vec],
                         delay_lut=self.delay_lut,
-                        budget=None,
                     )
-                    emitted_explore += len(be_explore)
-                    for ev in be_explore:
-                        ev2 = self._apply_stability_rules(ev, pre_tile)
+                    emitted_explore += len(pairs_exp)
+                    for ev, pt in pairs_exp:
+                        ev2 = self._apply_stability_rules(ev, int(pt))
                         if ev2 is not None:
-                            pending.append((ev2, pre_tile))
+                            pending.append((ev2, int(pt)))
 
             # Determine leading channel tiles for P0 classification
             leader_idx = int(np.argmax(self.readout._counts)) if self.readout._counts is not None else 0

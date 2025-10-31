@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from typing import List
+from typing import Iterable, List, Sequence, Tuple
 
 import numpy as np
 
@@ -147,3 +147,47 @@ def gen_block_events(
 
 
 __all__ = ["gen_block_events", "JITTER_MAX"]
+ 
+ 
+def gen_block_events_batch(
+    pre_ids: Sequence[int],
+    step: int,
+    pre_tiles: Sequence[int],
+    alias_tbls: Sequence[AliasForTile],
+    tile_size: int,
+    T_tiles: int,
+    M: int,
+    seeds: Sequence[int | np.uint64],
+    delay_lut: np.ndarray | None = None,
+) -> List[Tuple[BlockEvent, int]]:
+    """Batch wrapper that generates events for multiple presynaptic neurons.
+
+    Returns a list of (BlockEvent, pre_tile) pairs in the same order as inputs,
+    preserving determinism with per-pre seeds.
+    """
+    n = len(pre_ids)
+    if not (len(pre_tiles) == n and len(alias_tbls) == n and len(seeds) == n):
+        raise ValueError("pre_ids, pre_tiles, alias_tbls, seeds must have same length")
+    out: List[Tuple[BlockEvent, int]] = []
+    for i in range(n):
+        pid = int(pre_ids[i])
+        ptile = int(pre_tiles[i])
+        alias = alias_tbls[i]
+        seed = seeds[i]
+        evs = gen_block_events(
+            pre_id=pid,
+            step=step,
+            pre_tile=ptile,
+            alias_tbl=alias,
+            tile_size=int(tile_size),
+            T_tiles=int(T_tiles),
+            M=int(M),
+            seed=np.uint64(seed),
+            delay_lut=delay_lut,
+            budget=None,
+        )
+        for ev in evs:
+            out.append((ev, ptile))
+    return out
+
+__all__.append("gen_block_events_batch")
