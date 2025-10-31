@@ -6,6 +6,7 @@ from time import perf_counter
 from typing import List
 
 import numpy as np
+from symbolicplastic_snn.core.prng import FloatRng
 
 from symbolicplastic_snn.runner.loop import RunnerConfig, SnnRunner
 
@@ -31,7 +32,7 @@ def main() -> None:
     )
     runner = SnnRunner(rc, seed=args.seed)
 
-    rng = np.random.default_rng(args.seed)
+    rng = FloatRng(args.seed)
     tracemalloc.start()
     t0 = perf_counter()
     for t in range(args.steps):
@@ -52,4 +53,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

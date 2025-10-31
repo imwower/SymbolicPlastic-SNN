@@ -7,6 +7,7 @@ from time import perf_counter
 from typing import Any, Dict
 
 import numpy as np
+from symbolicplastic_snn.core.prng import FloatRng
 
 from symbolicplastic_snn.runner.loop import RunnerConfig, SnnRunner
 
@@ -32,7 +33,7 @@ def build_runner(args: argparse.Namespace) -> SnnRunner:
 
 def run_once(args: argparse.Namespace) -> Dict[str, Any]:
     runner = build_runner(args)
-    rng = np.random.default_rng(args.seed)
+    rng = FloatRng(args.seed)
     step_times = []
     spikes_total = 0
     processed_total = 0
@@ -98,4 +99,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

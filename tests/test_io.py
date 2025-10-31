@@ -10,11 +10,12 @@ from symbolicplastic_snn.io.snapshot import save_snapshot, load_snapshot
 
 def test_snapshot_roundtrip():
     n = 64
-    v = (np.random.default_rng(0).integers(-30000, 30000, size=n)).astype(np.int16)
-    ref = (np.random.default_rng(1).integers(0, 10, size=n)).astype(np.uint8)
-    seeds = (np.random.default_rng(2).integers(0, 2**63, size=n, dtype=np.int64)).astype(np.uint64)
-    alias_prob = (np.random.default_rng(3).integers(0, 65535, size=16)).astype(np.uint16)
-    alias_alias = (np.random.default_rng(4).integers(0, 16, size=16)).astype(np.int32)
+    # Deterministic sequences (no external RNG)
+    v = (((np.arange(n, dtype=np.int32) * 12345) % 60001) - 30000).astype(np.int16)
+    ref = (np.arange(n, dtype=np.int32) % 10).astype(np.uint8)
+    seeds = (np.arange(n, dtype=np.uint64) * np.uint64(0x9E3779B97F4A7C15)).astype(np.uint64)
+    alias_prob = (np.arange(16, dtype=np.uint16) * np.uint16(4096)).astype(np.uint16)
+    alias_alias = (np.arange(16, dtype=np.int32) % 16).astype(np.int32)
     alias = {"prob": alias_prob, "alias": alias_alias}
     rng_state = {"algo": "splitmix64", "seed": 12345, "step": 678}
 
@@ -87,4 +88,3 @@ def test_config_validate(tmp_path):
     )
     cfg2 = load_yaml(str(j))
     validate_config(cfg2)
-

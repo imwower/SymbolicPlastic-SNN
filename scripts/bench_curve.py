@@ -5,6 +5,7 @@ import csv
 from typing import Any, Dict, List
 
 from bench_throughput import build_runner  # reuse helper
+from symbolicplastic_snn.core.prng import FloatRng
 
 
 def run_curve(args: argparse.Namespace) -> List[Dict[str, Any]]:
@@ -14,8 +15,7 @@ def run_curve(args: argparse.Namespace) -> List[Dict[str, Any]]:
         args.budget = int(b)
         runner = build_runner(args)
         # Minimal per-budget run
-        import numpy as np
-        rng = np.random.default_rng(args.seed)
+        rng = FloatRng(args.seed)
         spikes_total = 0
         processed_total = 0
         deferred_total = 0
@@ -81,4 +81,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import numpy as np
+from symbolicplastic_snn.core.prng import FloatRng
 
 from symbolicplastic_snn.io.config import load_yaml, validate_config
 from symbolicplastic_snn.runner.loop import SnnRunner, RunnerConfig
@@ -103,7 +104,7 @@ def main() -> None:
         except Exception as e:
             print(f"Warning: failed to load state: {e}")
 
-    rng = np.random.default_rng(args.seed)
+    rng = FloatRng(args.seed)
     for t in range(args.steps):
         # Synthetic input in [0,1)
         x = rng.random(runner.N, dtype=np.float32)

@@ -1,4 +1,5 @@
 import numpy as np
+from symbolicplastic_snn.core.prng import FloatRng
 
 from symbolicplastic_snn.runner.loop import SnnRunner, RunnerConfig
 
@@ -8,8 +9,9 @@ def test_smoke_small_network():
     runner = SnnRunner(cfg, seed=123)
 
     T = 100
-    # Synthetic input: random in [0,1)
-    X_T = [np.random.default_rng(0).random(runner.N).astype(np.float32) for _ in range(T)]
+    # Synthetic input: deterministic pseudo-random in [0,1)
+    rng = FloatRng(seed=0)
+    X_T = [rng.random(runner.N).astype(np.float32) for _ in range(T)]
     out = runner.run(X_T)
     # Runner should produce output dict with label/scores
     assert isinstance(out, dict)
@@ -32,4 +34,3 @@ def test_readout_nonempty():
     out = runner.run(X_T)
     assert out["label"] in ("C0", "C1")
     # Expect C0 often due to stronger drive; not strictly asserted
-

@@ -37,9 +37,9 @@ def _uniform_q016(n: int) -> np.ndarray:
 
 
 def test_alias_sum_q016():
-    # Random unnormalized weights
-    rng = np.random.default_rng(123)
-    raw = rng.integers(low=0, high=65535, size=37, dtype=np.uint16)
+    # Pseudo-random unnormalized weights using local xorshift64* helper
+    rng16 = _xs64star_rng_uint16(123)
+    raw = rng16(37)
     # Apply zero delta but enforce keep_sum; expect total 65535
     out = reweight_alias(raw, np.zeros_like(raw, dtype=np.int32), keep_sum=True)
     assert out.dtype == np.uint16
