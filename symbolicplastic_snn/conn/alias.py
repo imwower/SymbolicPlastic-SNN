@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import numpy as np
 
 
-def _prefix_sum_uint16(a: np.ndarray) -> np.ndarray:
+def prefix_sum_uint16(a: np.ndarray) -> np.ndarray:
     """Prefix sum for uint16 arrays using uint32 accumulator.
 
     Returns a uint32 array ps where ps[i] = sum(a[: i + 1]).
@@ -42,7 +42,7 @@ def build_alias(prob_q016: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         raise ValueError("prob_q016 must be non-empty")
 
     # Total mass using precise prefix sum.
-    total = int(_prefix_sum_uint16(prob_q016)[-1])
+    total = int(prefix_sum_uint16(prob_q016)[-1])
 
     prob = np.zeros(n, dtype=np.uint16)
     alias = np.arange(n, dtype=np.int32)
@@ -219,10 +219,25 @@ def reweight_alias(
     return out.astype(np.uint16)
 
 
+def reweight_alias_smallstep(
+    prob: np.ndarray,
+    delta_int: np.ndarray,
+    keep_sum: bool = True,
+) -> np.ndarray:
+    """Compatibility wrapper: same as reweight_alias().
+
+    - Applies integer delta with clipping to [0, 65535], then optional exact
+      normalization to sum 65535.
+    """
+    return reweight_alias(prob, delta_int, keep_sum=keep_sum)
+
+
 __all__ = [
     "build_alias",
     "sample_alias",
     "reweight_alias",
+    "reweight_alias_smallstep",
+    "prefix_sum_uint16",
     "AliasForTile",
 ]
 
