@@ -9,7 +9,7 @@ import numpy as np
 from symbolicplastic_snn.conn.alias import AliasForTile, build_alias
 from symbolicplastic_snn.conn.generator import gen_block_events
 from symbolicplastic_snn.core.lif_fixedpoint import ConfigFp, lif_step
-from symbolicplastic_snn.encode.input_encoders import rate_encode
+from symbolicplastic_snn.encode.input_encoders import rate_encode_q016
 from symbolicplastic_snn.realtime.budgeter import EventBudget
 from symbolicplastic_snn.schedule.timewheel import BlockEvent, TimeWheel
 from symbolicplastic_snn.readout.readout import Readout, ReadoutConfig
@@ -41,6 +41,8 @@ class RunnerConfig:
     # Core vs Explore quotas for generator
     core_ratio: float = 0.8
     explore_ratio: float = 0.2
+    # Global seed controls all PRNGs (SplitMix64-based)
+    # Note: `seed` param in constructor still used to init this.
 
 
 class SnnRunner:
@@ -50,10 +52,12 @@ class SnnRunner:
         self.tile_size = int(self.cfg.tile_size)
         self.N = self.n_tiles * self.tile_size
 
+        # PRNG seed
+        self._global_seed = np.uint64(seed)
+
         # State
         self.v = np.zeros(self.N, dtype=np.int16)
         self.ref = np.zeros(self.N, dtype=np.uint8)
-        self.rng = np.random.default_rng(seed)
 
         # Alias table: uniform over tiles
         base = 65535 // self.n_tiles
@@ -67,9 +71,8 @@ class SnnRunner:
         # Delay LUT (uint8), zeros by default
         self.delay_lut = np.zeros((self.n_tiles, self.n_tiles), dtype=np.uint8)
 
-        # Seeds: core and flex
-        self.seeds_core = self.rng.integers(0, 1 << 63, size=self.N, dtype=np.int64).astype(np.uint64)
-        self.seeds_flex = self.rng.integers(0, 1 << 63, size=self.N, dtype=np.int64).astype(np.uint64)
+        # Seeds: core and flex, derived deterministically via SplitMix64 hashing
+        self.seeds_core, self.seeds_flex = self._init_seeds_splitmix64()
 
         # Time wheel
         self.wheel = TimeWheel(slots=int(self.cfg.slots), bytes_cap=None)
@@ -98,8 +101,8 @@ class SnnRunner:
     # ---------------- Runner API ----------------
     def step(self, x_t: np.ndarray) -> Optional[Dict[str, Any]]:
         t0 = time.perf_counter()
-        # 1) Encode input into immediate events (delay=0) and push
-        mask = rate_encode(np.asarray(x_t, dtype=np.float32), self.cfg.rate_max, self.rng)
+        # 1) Encode input into immediate events (delay=0) using integer Bernoulli with Q0.16 probabilities
+        mask = self._encode_input_q016(np.asarray(x_t, dtype=np.float32))
         self._push_input_spikes(mask)
 
         # 2) Pop current slot, aggregate to I vector, and LIF update
@@ -111,12 +114,7 @@ class SnnRunner:
             self.spike_counts += spikes.astype(np.int32)
 
         # Update tile bit-window history
-        tile_spk = np.zeros(self.n_tiles, dtype=bool)
-        for t in range(self.n_tiles):
-            s = t * self.tile_size
-            e = s + self.tile_size
-            if np.any(spikes[s:e]):
-                tile_spk[t] = True
+        tile_spk = spikes.reshape(self.n_tiles, self.tile_size).any(axis=1)
         self.tile_bw.push(tile_spk)
 
         # 3) Generate next-step connectivity-driven events (prioritized, budgeted)
@@ -272,9 +270,14 @@ class SnnRunner:
             # Determine bottom fraction by spike_counts
             frac = min(1.0, max(0.0, float(self.cfg.low_contrib_frac)))
             if frac > 0.0:
-                # Compute threshold by quantile
-                thresh = np.quantile(self.spike_counts, frac)
-                low_mask = self.spike_counts <= int(thresh)
+                # Compute integer threshold by order statistic (avoid float quantile)
+                cnts = self.spike_counts
+                if cnts.size > 0:
+                    k = int(round(frac * max(0, cnts.size - 1)))
+                    thresh = int(np.sort(cnts)[k])
+                else:
+                    thresh = 0
+                low_mask = cnts <= thresh
                 before = self.seeds_flex.copy()
                 reseed_small_fraction(
                     self.seeds_core,
@@ -307,6 +310,53 @@ class SnnRunner:
             "spikes_count": int(spikes.sum()) if spikes.size else 0,
         }
         return out
+
+    # ---------------- PRNG helpers ----------------
+    _SPLITMIX64_INC = np.uint64(0x9E3779B97F4A7C15)
+    _SPLITMIX64_M1 = np.uint64(0xBF58476D1CE4E5B9)
+    _SPLITMIX64_M2 = np.uint64(0x94D049BB133111EB)
+
+    def _hash64_vec(self, x: np.ndarray) -> np.ndarray:
+        z = (x + self._SPLITMIX64_INC).astype(np.uint64)
+        z ^= (z >> np.uint64(30))
+        z = (z * self._SPLITMIX64_M1).astype(np.uint64)
+        z ^= (z >> np.uint64(27))
+        z = (z * self._SPLITMIX64_M2).astype(np.uint64)
+        z ^= (z >> np.uint64(31))
+        return z.astype(np.uint64)
+
+    def _rng_uint16_for_step(self, step: int, size: int) -> np.ndarray:
+        # Vectorized SplitMix64 stream: state_i = seed + INC*(i+1)
+        base = (self._global_seed ^ np.uint64(step) ^ np.uint64(0xD1342543DE82EF95)).astype(np.uint64)
+        idx = np.arange(1, size + 1, dtype=np.uint64)
+        state = (base + idx * self._SPLITMIX64_INC).astype(np.uint64)
+        z = state.copy()
+        z ^= (z >> np.uint64(30))
+        z = (z * self._SPLITMIX64_M1).astype(np.uint64)
+        z ^= (z >> np.uint64(27))
+        z = (z * self._SPLITMIX64_M2).astype(np.uint64)
+        z ^= (z >> np.uint64(31))
+        return ((z >> np.uint64(48)) & np.uint64(0xFFFF)).astype(np.uint16)
+
+    def _init_seeds_splitmix64(self) -> tuple[np.ndarray, np.ndarray]:
+        idx = np.arange(self.N, dtype=np.uint64)
+        a = (self._global_seed ^ (idx * np.uint64(0xD1342543DE82EF95)) ^ np.uint64(0x9E3779B97F4A7C15)).astype(np.uint64)
+        b = (self._global_seed ^ (idx * np.uint64(0x94D049BB133111EB)) ^ np.uint64(0xBF58476D1CE4E5B9)).astype(np.uint64)
+        seeds_core = self._hash64_vec(a)
+        seeds_flex = self._hash64_vec(b)
+        return seeds_core.astype(np.uint64), seeds_flex.astype(np.uint64)
+
+    # ---------------- Input encoding helpers ----------------
+    def _encode_input_q016(self, x_t: np.ndarray) -> np.ndarray:
+        # Convert float input to Q0.16 probabilities, then integer Bernoulli via per-step SplitMix64 stream
+        x = np.asarray(x_t, dtype=np.float32)
+        # p_float = clip(x * rate_max, 0, 1)
+        p = np.clip(x * float(self.cfg.rate_max), 0.0, 1.0)
+        # Convert to Q0.16 with rounding
+        p_q = np.minimum((p * 65535.0 + 0.5).astype(np.int64), 65535).astype(np.uint16)
+        r = self._rng_uint16_for_step(self._step_index, self.N)
+        mask = rate_encode_q016(p_q, lambda size: r[:size])
+        return mask.reshape(-1)
 
     def run(self, X_T: Iterable[np.ndarray]) -> Dict[str, Any]:
         out: Optional[Dict[str, Any]] = None

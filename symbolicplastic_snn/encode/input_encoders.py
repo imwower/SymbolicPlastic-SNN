@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Callable, Tuple
 
 import numpy as np
 
@@ -51,3 +51,16 @@ def diff_encode(x_t: np.ndarray, x_tm1: np.ndarray, thr: float) -> Tuple[np.ndar
 
 __all__ = ["rate_encode", "latency_encode", "diff_encode"]
 
+
+def rate_encode_q016(x_q: np.ndarray, rng_uint16: Callable[[int], np.ndarray]) -> np.ndarray:
+    """Integer Bernoulli sampling with Q0.16 probabilities.
+
+    - x_q: uint16 array where value v means p = v / 65535.
+    - rng_uint16(size): returns uint16 uniform in [0, 65535].
+    Returns boolean mask of same shape.
+    """
+    xq = np.asarray(x_q, dtype=np.uint16)
+    r = np.asarray(rng_uint16(xq.size), dtype=np.uint16).reshape(xq.shape)
+    return r < xq
+
+__all__.extend(["rate_encode_q016"])
