@@ -52,8 +52,12 @@ def build_alias(prob_q016: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         prob.fill(np.uint16(65535))
         return prob, alias
 
+    # Optional numba-accelerated core if available
+    if _NUMBA_AVAILABLE:
+        p, a = _build_alias_numba_core(prob_q016.astype(np.uint16))
+        return p.astype(np.uint16), a.astype(np.int32)
+
     # Scale weights by n to compare against total mass (Vose's method).
-    # Si = wi * n, compare with total.
     w32 = prob_q016.astype(np.uint32)
     S = (w32.astype(np.uint64) * np.uint64(n)).astype(np.int64)
     total64 = np.int64(total)
@@ -67,26 +71,20 @@ def build_alias(prob_q016: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         elif S[i] > total64:
             large.append(i)
         else:
-            # Exactly equal to 1.0 in scaled domain.
             prob[i] = np.uint16(65535)
             alias[i] = np.int32(i)
-            # Do not push to stacks.
 
     # Process pairs
     while small and large:
         i = small.pop()
         j = large.pop()
 
-        # Threshold for i: floor((Si / total) * 2^16). Keep in [0, 65535].
-        # Use 2^16 scaling then compare using r2 < threshold.
-        thr = (np.int64(S[i]) << 16) // total64  # in [0, 65536)
+        thr = (np.int64(S[i]) << 16) // total64
         if thr >= 65536:
             thr = 65535
         prob[i] = np.uint16(thr)
         alias[i] = np.int32(j)
 
-        # Reduce Sj by the leftover probability allocated to fill column i.
-        # New Sj = Sj - (total - Si)
         Sj_new = S[j] - (total64 - S[i])
         S[j] = Sj_new
         if Sj_new < total64:
@@ -97,7 +95,6 @@ def build_alias(prob_q016: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
             prob[j] = np.uint16(65535)
             alias[j] = np.int32(j)
 
-    # Any remaining entries are exactly 1.0 columns.
     for i in small:
         prob[i] = np.uint16(65535)
         alias[i] = np.int32(i)
@@ -246,3 +243,73 @@ class AliasForTile:
             self.prob = self.prob.astype(np.uint16, copy=False)
         if self.alias.dtype != np.int32:
             self.alias = self.alias.astype(np.int32, copy=False)
+_NUMBA_AVAILABLE = False
+try:  # optional acceleration
+    import numba as _nb  # type: ignore
+
+    _NUMBA_AVAILABLE = True
+except Exception:  # pragma: no cover - optional
+    _NUMBA_AVAILABLE = False
+
+
+if _NUMBA_AVAILABLE:  # pragma: no cover - jit accelerates loops
+    @_nb.njit(cache=True)
+    def _build_alias_numba_core(w: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        n = w.shape[0]
+        prob = np.zeros(n, dtype=np.uint16)
+        alias = np.arange(n, dtype=np.int32)
+        total = np.int64(0)
+        for i in range(n):
+            total += np.int64(w[i])
+        if total == 0:
+            for i in range(n):
+                prob[i] = np.uint16(65535)
+            return prob, alias
+        total64 = np.int64(total)
+        S = np.empty(n, dtype=np.int64)
+        for i in range(n):
+            S[i] = np.int64(w[i]) * np.int64(n)
+        small = np.empty(n, dtype=np.int32)
+        large = np.empty(n, dtype=np.int32)
+        ns = 0
+        nl = 0
+        for i in range(n):
+            if S[i] < total64:
+                small[ns] = i
+                ns += 1
+            elif S[i] > total64:
+                large[nl] = i
+                nl += 1
+            else:
+                prob[i] = np.uint16(65535)
+                alias[i] = np.int32(i)
+        while ns > 0 and nl > 0:
+            ns -= 1
+            i = int(small[ns])
+            nl -= 1
+            j = int(large[nl])
+            thr = (S[i] << 16) // total64
+            if thr >= 65536:
+                thr = 65535
+            prob[i] = np.uint16(thr)
+            alias[i] = np.int32(j)
+            Sj_new = S[j] - (total64 - S[i])
+            S[j] = Sj_new
+            if Sj_new < total64:
+                small[ns] = j
+                ns += 1
+            elif Sj_new > total64:
+                large[nl] = j
+                nl += 1
+            else:
+                prob[j] = np.uint16(65535)
+                alias[j] = np.int32(j)
+        for t in range(ns):
+            i = int(small[t])
+            prob[i] = np.uint16(65535)
+            alias[i] = np.int32(i)
+        for t in range(nl):
+            j = int(large[t])
+            prob[j] = np.uint16(65535)
+            alias[j] = np.int32(j)
+        return prob, alias
