@@ -331,6 +331,26 @@ readout:
   - ei_mapping_mode: E/I 划分模式（half/alternating/custom）；ei_tiles: 自定义 E tiles 列表
   - preaggregate: 是否启用运行器 pending 事件预聚合（按 (post_tile, delay) 聚合，减少 push 数量）；默认 false，建议在事件量大或预算紧张时开启
   - preaggregate_min_events: 触发预聚合的最小 pending 事件数阈值（默认 64）
+
+### 保存/恢复训练断点（Runner 快照）
+
+- 保存当前状态（v/ref、seeds_core/seeds_flex、alias_corr_prob、corr_accum、tile 位窗、spike_counts、step_index、global_seed、alias_version、config 等）
+
+```
+python scripts/run_local.py --steps 500 --save-prefix checkpoints/run1
+```
+
+会生成 `checkpoints/run1_runner.bin`（二进制 + JSON 头）。
+
+- 从快照继续运行，并可再次保存到新前缀：
+
+```
+python scripts/run_local.py --steps 500 --load-prefix checkpoints/run1 --save-prefix checkpoints/run1_next
+```
+
+说明
+- 快照 I/O 使用 memmap + JSON meta，保持 dtype/shape 一致与跨平台确定性。
+- 加载后会重建内部别名缓存，延迟到首次使用时按最新状态懒重建。
 - stability_rules
   - forbid_short_EE_loops: 禁止短 E→E 回路
   - min_ee_delay: 短回路最小延迟
