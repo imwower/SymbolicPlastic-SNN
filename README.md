@@ -407,6 +407,37 @@ v, ref, seeds, alias2, stable, rng = load_checkpoint("ckpt.bin")
 
 脚本 `run_local.py` 的 `--save-prefix/--load-prefix` 已包含 StableStore 在内的 Runner 快照；可与 `--save-stable/--load-stable` 配合使用。
 
+### 启用塑性管道（Pipeline）
+
+默认已启用宏观别名重权 + 微观 reseed + 稳定连接推广/降级（周期 1000 步）。你可以在配置中显式控制周期与阈值。
+
+示例配置（YAML/JSON 皆可）：
+
+```yaml
+pipeline:
+  enabled: true         # 开/关管道（默认 true）
+  period: 1000          # 每 1000 步执行一次
+  promote_min_age: 5000 # 推广阈值（步）
+  promote_min_corr: 10  # 推广相关阈值（整数）
+  promote_min_hits: 50  # 重频阈值（SpaceSavingK）
+  promote_per_pre_cap: 128
+  demote_age: 8000      # 长期未用降级
+  demote_corr: -10      # 负相关降级
+  flip_sign_pos: 20     # 翻正号阈值
+  flip_sign_neg: -20    # 翻负号阈值
+plasticity:
+  low_contrib_frac: 0.2 # 底部 20% 参与 reseed 候选
+  reseed_rate: 0.25     # 在候选中按该概率 reseed（仅 flex）
+```
+
+运行示例：
+
+```
+python scripts/run_local.py --steps 50000 --config path/to/cfg.yml
+```
+
+脚本会每 500 步输出 periodic_metrics，观察 promoted/demoted/frozen/stable_edges_total 及预算/延后指标；当 `frozen_count` 持续增长时，会附注“固化阶段”，便于观测训练阶段转换。
+
 
 ## 默认超参速查表
 

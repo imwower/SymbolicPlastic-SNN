@@ -55,6 +55,10 @@ def cfg_from_dict(d: Dict[str, Any]) -> RunnerConfig:
                 rc.corr_decay_period = int(pl["corr_decay_period"])
             if "corr_decay_shift" in pl:
                 rc.corr_decay_shift = int(pl["corr_decay_shift"])
+            if "low_contrib_frac" in pl:
+                rc.low_contrib_frac = float(pl["low_contrib_frac"])
+            if "reseed_rate" in pl:
+                rc.reseed_rate = float(pl["reseed_rate"])
         # Connectivity quotas
         if "connectivity" in d and isinstance(d["connectivity"], dict):
             cn = d["connectivity"]
@@ -87,6 +91,29 @@ def cfg_from_dict(d: Dict[str, Any]) -> RunnerConfig:
                 rc.stability_min_ee_delay = int(st["min_ee_delay"])
             if "drop_short_EE" in st:
                 rc.stability_drop_short_EE = bool(st["drop_short_EE"])
+        # Pipeline hooks
+        if "pipeline" in d and isinstance(d["pipeline"], dict):
+            ph = d["pipeline"]
+            if "enabled" in ph:
+                rc.pipeline_enabled = bool(ph["enabled"])
+            if "period" in ph:
+                rc.pipeline_period = int(ph["period"])
+            if "promote_min_age" in ph:
+                rc.promote_min_age = int(ph["promote_min_age"])
+            if "promote_min_corr" in ph:
+                rc.promote_min_corr = int(ph["promote_min_corr"])
+            if "promote_min_hits" in ph:
+                rc.promote_min_hits = int(ph["promote_min_hits"])
+            if "promote_per_pre_cap" in ph:
+                rc.promote_per_pre_cap = int(ph["promote_per_pre_cap"])
+            if "demote_age" in ph:
+                rc.demote_age = int(ph["demote_age"])
+            if "demote_corr" in ph:
+                rc.demote_corr = int(ph["demote_corr"])
+            if "flip_sign_pos" in ph:
+                rc.flip_sign_pos = int(ph["flip_sign_pos"])
+            if "flip_sign_neg" in ph:
+                rc.flip_sign_neg = int(ph["flip_sign_neg"])
     except Exception:
         pass
     return rc

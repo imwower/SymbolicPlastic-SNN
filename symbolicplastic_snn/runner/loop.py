@@ -18,6 +18,10 @@ from symbolicplastic_snn.plasticity.update import reweight_alias_smallstep, rese
 from symbolicplastic_snn.plasticity.stable_store import StableStore
 from symbolicplastic_snn.io.stable_snapshot import _store_to_arrays as _stable_to_arrays, _arrays_to_store as _arrays_to_stable
 from symbolicplastic_snn.runner.metrics import MetricsTracker
+from symbolicplastic_snn.plasticity.heavy_hitters import SpaceSavingK
+from symbolicplastic_snn.plasticity.counters import update_edge_usage as _update_edge_usage
+from symbolicplastic_snn.runner.hooks import apply_plasticity_pipeline
+from symbolicplastic_snn.plasticity.consolidation import PromoteConfig
 from symbolicplastic_snn.io.snapshot import (
     save_snapshot,
     load_snapshot,
@@ -74,6 +78,18 @@ class RunnerConfig:
     # Pending events pre-aggregation into (post_tile, delay) groups
     preaggregate: bool = False
     preaggregate_min_events: int = 64
+    # Plasticity pipeline hooks (macro reweight + micro reseed + consolidation)
+    pipeline_enabled: bool = True
+    pipeline_period: int = 1000
+    # Promote/demote thresholds (optional override; defaults match PromoteConfig)
+    promote_min_age: int = 5000
+    promote_min_corr: int = 10
+    promote_min_hits: int = 50
+    promote_per_pre_cap: int = 128
+    demote_age: int = 8000
+    demote_corr: int = -10
+    flip_sign_pos: int = 20
+    flip_sign_neg: int = -20
 
 
 class SnnRunner:
@@ -148,6 +164,11 @@ class SnnRunner:
         self.stable_store = StableStore()
         # Metrics tracker (cumulative)
         self.metrics_tracker = MetricsTracker()
+        # Heavy-hitter trackers per pre_tile (to keep memory bounded)
+        self.hh_maps: dict[int, SpaceSavingK] = {}
+        # Pairwise sparse stats
+        self._edge_last_seen: dict[tuple[int, int], int] = {}
+        self._edge_corr_map: dict[tuple[int, int], int] = {}
 
     # ---------------- Runner API ----------------
     def step(self, x_t: np.ndarray) -> Optional[Dict[str, Any]]:
@@ -243,6 +264,30 @@ class SnnRunner:
                         if ev2 is not None:
                             pending.append((ev2, int(pt)))
 
+            # Update heavy-hitter usage from pending events (pre_tile -> global post_id)
+            if pending:
+                # Flatten pairs
+                total = sum(int(ev.indices.size) for ev, _ in pending)
+                if total > 0:
+                    pre_buf = np.empty(total, dtype=np.int32)
+                    post_buf = np.empty(total, dtype=np.int32)
+                    off = 0
+                    for ev, pt in pending:
+                        n = int(ev.indices.size)
+                        if n == 0:
+                            continue
+                        pre_buf[off:off+n] = int(pt)
+                        post_buf[off:off+n] = int(ev.post_tile) * self.tile_size + ev.indices.astype(np.int32)
+                        # Update ages/corr sparse maps
+                        step_now = int(self._step_index)
+                        for j in range(n):
+                            key = (int(pt), int(post_buf[off + j]))
+                            self._edge_last_seen[key] = step_now
+                            # Increment corr proxy by k value
+                            self._edge_corr_map[key] = self._edge_corr_map.get(key, 0) + int(ev.k[j])
+                        off += n
+                    _update_edge_usage(pre_buf[:off], post_buf[:off], self.hh_maps, capacity=64)
+
             # Determine leading channel tiles for P0 classification
             leader_idx = int(np.argmax(self.readout._counts)) if self.readout._counts is not None else 0
             tiles_per_channel = self.N // 2 // self.tile_size  # tiles per readout channel (2 channels)
@@ -335,46 +380,93 @@ class SnnRunner:
             if decay_p > 0 and (self._step_index % int(decay_p) == 0):
                 self.corr_accum = (self.corr_accum - (self.corr_accum >> int(decay_s))).astype(np.int32)
 
-            # Reweight alias probabilities across tiles
-            new_prob_q = reweight_alias_smallstep(
-                prob_q016=self.alias_corr_prob,
-                corr_int32=self.corr_accum,
-                lr_num=int(self.cfg.lr_num),
-                lr_den=int(self.cfg.lr_den),
-                keep_sum=True,
-                ei_quota=None,
-                long_range_ratio=None,
-            )
-            self.alias_corr_prob = new_prob_q
-            self._alias_version += 1
-            # Invalidate caches
-            self._alias_cache_core.clear()
-            self._alias_cache_explore.clear()
-            reweighted = True
-            # Decay or reset corr after applying
-            # Keep running corr, do not zero; leave decay to rule above
-
-            # Reseed low-contribution neurons in exploration seeds only
-            # Determine bottom fraction by spike_counts
-            frac = min(1.0, max(0.0, float(self.cfg.low_contrib_frac)))
-            if frac > 0.0:
-                # Compute integer threshold by order statistic (avoid float quantile)
+            # Execute macro/micro/consolidation pipeline if enabled; else keep legacy path
+            if getattr(self.cfg, "pipeline_enabled", False):
+                # Reseed mask by low contribution
+                frac = min(1.0, max(0.0, float(self.cfg.low_contrib_frac)))
                 cnts = self.spike_counts
-                if cnts.size > 0:
-                    k = int(round(frac * max(0, cnts.size - 1)))
-                    thresh = int(np.sort(cnts)[k])
+                if cnts.size > 0 and frac > 0.0:
+                    kidx = int(round(frac * max(0, cnts.size - 1)))
+                    thresh = int(np.sort(cnts)[kidx])
+                    reseed_mask = cnts <= thresh
                 else:
-                    thresh = 0
-                low_mask = cnts <= thresh
-                before = self.seeds_flex.copy()
-                reseed_small_fraction(
-                    self.seeds_core,
-                    self.seeds_flex,
-                    low_mask,
-                    rate=float(self.cfg.reseed_rate),
-                    epoch=self._step_index,
+                    reseed_mask = np.zeros(self.N, dtype=bool)
+                # Ages from last seen
+                ages: dict[tuple[int, int], int] = {}
+                now = int(self._step_index)
+                for key, last in self._edge_last_seen.items():
+                    ages[key] = max(0, now - int(last))
+                pcfg = PromoteConfig(
+                    min_age=int(self.cfg.promote_min_age),
+                    min_corr=int(self.cfg.promote_min_corr),
+                    min_hits=int(self.cfg.promote_min_hits),
+                    per_pre_cap=int(self.cfg.promote_per_pre_cap),
+                    demote_age=int(self.cfg.demote_age),
+                    demote_corr=int(self.cfg.demote_corr),
+                    flip_sign_pos=int(self.cfg.flip_sign_pos),
+                    flip_sign_neg=int(self.cfg.flip_sign_neg),
                 )
-                reseeded_cnt = int(np.count_nonzero(self.seeds_flex != before))
+                pl_out = apply_plasticity_pipeline(
+                    prob_q016=self.alias_corr_prob,
+                    corr_tile=self.corr_accum,
+                    seeds_flex=self.seeds_flex,
+                    reseed_mask=reseed_mask,
+                    store=self.stable_store,
+                    hh_maps=self.hh_maps,
+                    corr_map=self._edge_corr_map,
+                    ages=ages,
+                    lr_num=int(self.cfg.lr_num),
+                    lr_den=int(self.cfg.lr_den),
+                    ei_quota=None,
+                    long_range_ratio=None,
+                    reseed_rate=float(self.cfg.reseed_rate),
+                    epoch=self._step_index,
+                    promote_cfg=pcfg,
+                )
+                # Apply outputs
+                self.alias_corr_prob = pl_out["prob"].astype(np.uint16)
+                self._alias_version += 1
+                self._alias_cache_core.clear(); self._alias_cache_explore.clear()
+                reweighted = True
+                reseeded_cnt = int(pl_out.get("reseeded", 0))
+                # Accumulate metrics
+                self.metrics_tracker.update_from_runner(self, pipeline_out=pl_out)
+            else:
+                # Legacy: alias reweight + reseed flex
+                new_prob_q = reweight_alias_smallstep(
+                    prob_q016=self.alias_corr_prob,
+                    corr_int32=self.corr_accum,
+                    lr_num=int(self.cfg.lr_num),
+                    lr_den=int(self.cfg.lr_den),
+                    keep_sum=True,
+                    ei_quota=None,
+                    long_range_ratio=None,
+                )
+                self.alias_corr_prob = new_prob_q
+                self._alias_version += 1
+                # Invalidate caches
+                self._alias_cache_core.clear()
+                self._alias_cache_explore.clear()
+                reweighted = True
+                # Reseed low-contribution neurons in exploration seeds only
+                frac = min(1.0, max(0.0, float(self.cfg.low_contrib_frac)))
+                if frac > 0.0:
+                    cnts = self.spike_counts
+                    if cnts.size > 0:
+                        k = int(round(frac * max(0, cnts.size - 1)))
+                        thresh = int(np.sort(cnts)[k])
+                    else:
+                        thresh = 0
+                    low_mask = cnts <= thresh
+                    before = self.seeds_flex.copy()
+                    reseed_small_fraction(
+                        self.seeds_core,
+                        self.seeds_flex,
+                        low_mask,
+                        rate=float(self.cfg.reseed_rate),
+                        epoch=self._step_index,
+                    )
+                    reseeded_cnt = int(np.count_nonzero(self.seeds_flex != before))
 
         self._step_index += 1
         t1 = time.perf_counter()
