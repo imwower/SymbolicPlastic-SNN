@@ -324,6 +324,8 @@ readout:
   - period: 可塑性周期（步）
   - lr_num, lr_den: 别名重权学习率（整数分数）
   - corr_decay_period, corr_decay_shift: 相关度衰减配置（按周期 corr -= corr >> shift）
+  - low_contrib_frac: 以全局发放计数选出底部比例的“低贡献”神经元（0..1）
+  - reseed_rate: 对低贡献集合中按该概率重置“探索”通道的随机种子（0..1）
 - connectivity
   - core_ratio, explore_ratio: 核心/探索配额比例
   - core_long_range_ratio, explore_long_range_ratio: 长程偏置比例（分配到最后四分之一 tiles）
@@ -331,6 +333,16 @@ readout:
   - ei_mapping_mode: E/I 划分模式（half/alternating/custom）；ei_tiles: 自定义 E tiles 列表
   - preaggregate: 是否启用运行器 pending 事件预聚合（按 (post_tile, delay) 聚合，减少 push 数量）；默认 false，建议在事件量大或预算紧张时开启
   - preaggregate_min_events: 触发预聚合的最小 pending 事件数阈值（默认 64）
+
+### 探索种子重置（Reseed）
+
+- 目的：在不改变“核心”通道确定性的前提下，周期性地为低贡献神经元的“探索”通道刷新随机种子，以增加拓扑探索多样性。
+- 实现：`reseed_small_fraction(seeds_core:uint64[], seeds_flex:uint64[], low_contrib_mask:bool[], rate:float, epoch:int)`
+  - 仅对 `low_contrib_mask=True` 的索引进行候选筛选；核心 `seeds_core` 永不改变。
+  - 选择规则：对每个候选 i 计算 64 位混合哈希 `h_i = hash64(seeds_core[i] ^ seeds_flex[i] ^ mix(i, epoch))`，若 `h_i < rate * 2^64` 则选中。
+  - 更新：对选中的探索种子执行按位异或 `seeds_flex[i] ^= hash64(epoch)`；其余不变。
+  - 完全确定性：同样的 `(seeds_core, seeds_flex, low_contrib_mask, rate, epoch)` 组合得到一致结果。
+- 关键开关：核心/探索配额由连接生成器 `core_ratio/explore_ratio` 控制；reseed 仅作用于“探索”配额对应的种子。
 
 ### 保存/恢复训练断点（Runner 快照）
 
