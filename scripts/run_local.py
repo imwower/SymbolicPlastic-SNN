@@ -10,6 +10,7 @@ from symbolicplastic_snn.core.prng import FloatRng
 
 from symbolicplastic_snn.io.config import load_yaml, validate_config
 from symbolicplastic_snn.runner.loop import SnnRunner, RunnerConfig
+from symbolicplastic_snn.runner.metrics import MetricsTracker
 from symbolicplastic_snn.io.stable_snapshot import save_stable, load_stable
 
 
@@ -123,6 +124,7 @@ def main() -> None:
             print(f"Warning: failed to load stable store: {e}")
 
     rng = FloatRng(args.seed)
+    tracker = MetricsTracker()
     for t in range(args.steps):
         # Synthetic input in [0,1)
         x = rng.random(runner.N, dtype=np.float32)
@@ -132,6 +134,7 @@ def main() -> None:
             out = runner.readout.emit()
 
         metrics = runner.last_metrics
+        tracker.update_from_runner(runner)
         print(
             json.dumps(
                 {
@@ -144,6 +147,14 @@ def main() -> None:
                 }
             )
         )
+
+        # Periodic metrics report
+        if MetricsTracker.should_report(t + 1, period=500):
+            agg = tracker.to_dict()
+            phase = ""
+            if agg.get("frozen_count", 0) and agg.get("frozen_count", 0) >= 1:
+                phase = " 固化阶段"
+            print(json.dumps({"periodic_metrics": agg, "note": phase}))
 
     if args.save_prefix:
         runner.save_state(args.save_prefix)

@@ -17,6 +17,7 @@ from symbolicplastic_snn.plasticity.stats import BitWindow, update_corr
 from symbolicplastic_snn.plasticity.update import reweight_alias_smallstep, reseed_small_fraction
 from symbolicplastic_snn.plasticity.stable_store import StableStore
 from symbolicplastic_snn.io.stable_snapshot import _store_to_arrays as _stable_to_arrays, _arrays_to_store as _arrays_to_stable
+from symbolicplastic_snn.runner.metrics import MetricsTracker
 from symbolicplastic_snn.io.snapshot import (
     save_snapshot,
     load_snapshot,
@@ -145,6 +146,8 @@ class SnnRunner:
         self._tile_is_E = self._build_ei_mapping()
         # Stable connections store (pinned knowledge)
         self.stable_store = StableStore()
+        # Metrics tracker (cumulative)
+        self.metrics_tracker = MetricsTracker()
 
     # ---------------- Runner API ----------------
     def step(self, x_t: np.ndarray) -> Optional[Dict[str, Any]]:
@@ -382,6 +385,24 @@ class SnnRunner:
         avg_rate = float(spikes_count) / float(self.N) if self.N > 0 else 0.0
         total_generated = locals().get("emitted_core", 0) + locals().get("emitted_explore", 0)
         branch_factor = (float(total_generated) / float(spikes_count)) if spikes_count > 0 else 0.0
+        # Snapshot of stable store metrics for observability
+        stable_total = 0
+        stable_frozen = 0
+        per_pre_counts: dict[int, int] = {}
+        if hasattr(self, "stable_store") and self.stable_store is not None:
+            for e in self.stable_store.iter_all():
+                stable_total += 1
+                per_pre_counts[int(e.pre_id)] = per_pre_counts.get(int(e.pre_id), 0) + 1
+                # EDGE_CONS imported in metrics tracker; avoid import cycle by literal 2 guard
+                if int(getattr(e, "state", 0)) == 2:
+                    stable_frozen += 1
+        if per_pre_counts:
+            _arr = np.array(list(per_pre_counts.values()), dtype=np.float64)
+            stable_per_pre_mean = float(_arr.mean())
+            stable_per_pre_std = float(_arr.std(ddof=0))
+        else:
+            stable_per_pre_mean = 0.0
+            stable_per_pre_std = 0.0
         # Record metrics (include aliases for compatibility)
         self.last_metrics = {
             "step_time_sec": dur,
@@ -403,7 +424,23 @@ class SnnRunner:
             "spikes_count": spikes_count,
             "avg_rate": avg_rate,
             "branch_factor": branch_factor,
+            # Stable store snapshot metrics
+            "stable_edges_total": int(stable_total),
+            "stable_frozen_count": int(stable_frozen),
+            "stable_per_pre_mean": stable_per_pre_mean,
+            "stable_per_pre_std": stable_per_pre_std,
         }
+
+        # Update cumulative metrics tracker and mirror key counters into last_metrics
+        try:
+            self.metrics_tracker.update_from_runner(self, pipeline_out={"promoted": 0, "demoted": 0, "flipped": 0})
+            self.last_metrics["promoted_count"] = int(self.metrics_tracker.promoted_count)
+            self.last_metrics["demoted_count"] = int(self.metrics_tracker.demoted_count)
+            self.last_metrics["sign_flip_count"] = int(self.metrics_tracker.sign_flip_count)
+            # For convenience, also expose frozen_count snapshot (same as stable_frozen_count)
+            self.last_metrics["frozen_count"] = int(self.metrics_tracker.frozen_count)
+        except Exception:
+            pass
         return out
 
     # ---------------- PRNG helpers ----------------
