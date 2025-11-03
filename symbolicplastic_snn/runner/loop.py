@@ -371,13 +371,21 @@ class SnnRunner:
         t1 = time.perf_counter()
         dur = t1 - t0
         self.step_durations.append(dur)
-        # Record metrics
+        # Compute additional realtime metrics
+        spikes_count = int(spikes.sum()) if spikes.size else 0
+        avg_rate = float(spikes_count) / float(self.N) if self.N > 0 else 0.0
+        total_generated = locals().get("emitted_core", 0) + locals().get("emitted_explore", 0)
+        branch_factor = (float(total_generated) / float(spikes_count)) if spikes_count > 0 else 0.0
+        # Record metrics (include aliases for compatibility)
         self.last_metrics = {
             "step_time_sec": dur,
+            "step_time": dur,
             "budget_used": int(budget.used),
             "budget_total": budget_total,
             "budget_used_ratio": (float(budget.used) / budget_total) if budget_total > 0 else 0.0,
+            "used_budget_ratio": (float(budget.used) / budget_total) if budget_total > 0 else 0.0,
             "deferred_count": len(deferred_events),
+            "deferred_events": len(deferred_events),
             "processed_by_priority": processed_by_pri,
             "reweighted": reweighted,
             "reseeded_count": reseeded_cnt,
@@ -386,7 +394,9 @@ class SnnRunner:
             "quota_explore_tiles": locals().get("quota_explore_tiles", 0),
             "emitted_core_events": locals().get("emitted_core", 0),
             "emitted_explore_events": locals().get("emitted_explore", 0),
-            "spikes_count": int(spikes.sum()) if spikes.size else 0,
+            "spikes_count": spikes_count,
+            "avg_rate": avg_rate,
+            "branch_factor": branch_factor,
         }
         return out
 
@@ -568,7 +578,7 @@ class SnnRunner:
         self._alias_cache_core.clear()
         self._alias_cache_explore.clear()
 
-    def run(self, X_T: Iterable[np.ndarray]) -> Dict[str, Any]:
+    def run(self, X_T: Iterable[np.ndarray]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         out: Optional[Dict[str, Any]] = None
         for x_t in X_T:
             got = self.step(x_t)
@@ -578,7 +588,8 @@ class SnnRunner:
             self.wheel.tick()
 
         # Final emit if nothing early-exited
-        return out or self.readout.emit()
+        preds = out or self.readout.emit()
+        return preds, self.last_metrics
 
     # ---------------- Helpers ----------------
     def _push_input_spikes(self, mask: np.ndarray) -> None:
