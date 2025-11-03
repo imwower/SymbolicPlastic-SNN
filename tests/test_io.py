@@ -4,11 +4,11 @@ import tempfile
 
 import numpy as np
 
-from symbolicplastic_snn.io.config import load_yaml, validate_config
+from symbolicplastic_snn.io.config import load_cfg, validate_cfg
 from symbolicplastic_snn.io.snapshot import save_snapshot, load_snapshot
 
 
-def test_snapshot_roundtrip():
+def test_snapshot_roundtrip_bitwise_equal():
     n = 64
     # Deterministic sequences (no external RNG)
     v = (((np.arange(n, dtype=np.int32) * 12345) % 60001) - 30000).astype(np.int16)
@@ -50,8 +50,8 @@ def test_config_validate(tmp_path):
     )
     p = tmp_path / "cfg.yml"
     p.write_text(yaml_text, encoding="utf-8")
-    cfg = load_yaml(str(p))
-    validate_config(cfg)  # should not raise
+    cfg = load_cfg(str(p))
+    validate_cfg(cfg)  # should not raise
 
     # Missing sections/fields
     bad_yaml = (
@@ -66,10 +66,10 @@ def test_config_validate(tmp_path):
     )
     q = tmp_path / "bad.yml"
     q.write_text(bad_yaml, encoding="utf-8")
-    bad = load_yaml(str(q))
+    bad = load_cfg(str(q))
     raised = False
     try:
-        validate_config(bad)
+        validate_cfg(bad)
     except ValueError:
         raised = True
     assert raised
@@ -86,5 +86,5 @@ def test_config_validate(tmp_path):
         ),
         encoding="utf-8",
     )
-    cfg2 = load_yaml(str(j))
-    validate_config(cfg2)
+    cfg2 = load_cfg(str(j))
+    validate_cfg(cfg2)

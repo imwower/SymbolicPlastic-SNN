@@ -141,5 +141,19 @@ def validate_config(cfg: Dict[str, Any]) -> None:
             raise ValueError("fixed_point.lambda_q15 must be boolean")
 
 
-__all__ = ["load_yaml", "validate_config"]
+def load_cfg(path: str) -> Dict[str, Any]:
+    """Alias of load_yaml for compatibility with tests/spec."""
+    return load_yaml(path)
 
+
+def validate_cfg(cfg: Dict[str, Any]) -> None:
+    """Alias of validate_config for compatibility with tests/spec."""
+    validate_config(cfg)
+
+
+__all__ = [
+    "load_yaml",
+    "validate_config",
+    "load_cfg",
+    "validate_cfg",
+]
