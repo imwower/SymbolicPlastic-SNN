@@ -52,7 +52,7 @@ class PlasticityTests(unittest.TestCase):
         self.assertNotIn(2, pres)
 
 
-def test_bitwindow_shift():
+def test_bitwindow_shift_and_history():
     bw = BitWindow(width=8)
     # Use single-neuron mask for clarity
     bw.push(np.array([True], dtype=bool))   # 0000 0001
@@ -61,7 +61,7 @@ def test_bitwindow_shift():
     assert int(bw.get_history(0)) == 0b00000101
 
 
-def test_corr_sign():
+def test_corr_sign_pre_before_post_positive():
     # Pre at t0, Post at t0+delta => positive correlation
     delta = 2
     pre = 0
@@ -100,7 +100,7 @@ def test_corr_sign():
     assert d2 < 0
 
 
-def test_reweight_smallstep_sum():
+def test_reweight_sum_and_quotas_respected():
     n = 8
     # Start uniform over n entries summing to 65535
     base = 65535 // n
