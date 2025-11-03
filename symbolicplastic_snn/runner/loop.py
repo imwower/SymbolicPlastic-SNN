@@ -15,6 +15,8 @@ from symbolicplastic_snn.schedule.timewheel import BlockEvent, TimeWheel
 from symbolicplastic_snn.readout.readout import Readout, ReadoutConfig
 from symbolicplastic_snn.plasticity.stats import BitWindow, update_corr
 from symbolicplastic_snn.plasticity.update import reweight_alias_smallstep, reseed_small_fraction
+from symbolicplastic_snn.plasticity.stable_store import StableStore
+from symbolicplastic_snn.io.stable_snapshot import _store_to_arrays as _stable_to_arrays, _arrays_to_store as _arrays_to_stable
 from symbolicplastic_snn.io.snapshot import (
     save_snapshot,
     load_snapshot,
@@ -141,6 +143,8 @@ class SnnRunner:
         self._I_buf = np.zeros(self.N, dtype=np.int32)
         # Tile E/I mapping for stability rules
         self._tile_is_E = self._build_ei_mapping()
+        # Stable connections store (pinned knowledge)
+        self.stable_store = StableStore()
 
     # ---------------- Runner API ----------------
     def step(self, x_t: np.ndarray) -> Optional[Dict[str, Any]]:
@@ -208,6 +212,7 @@ class SnnRunner:
                         M=self.cfg.indices_per_event,
                         seeds=[int(self.seeds_core[int(pid)]) for pid in pre_ids_vec],
                         delay_lut=self.delay_lut,
+                        stable_store=self.stable_store,
                     )
                     emitted_core += len(pairs_core)
                     for ev, pt in pairs_core:
@@ -227,6 +232,7 @@ class SnnRunner:
                         M=self.cfg.indices_per_event,
                         seeds=[int(self.seeds_flex[int(pid)]) for pid in pre_ids_vec],
                         delay_lut=self.delay_lut,
+                        stable_store=self.stable_store,
                     )
                     emitted_explore += len(pairs_exp)
                     for ev, pt in pairs_exp:
@@ -551,6 +557,10 @@ class SnnRunner:
             "tile_bw_hist": (self.tile_bw._hist if self.tile_bw._hist is not None else np.zeros(self.n_tiles, dtype=np.uint32)),
             "spike_counts": self.spike_counts,
         }
+        # Add stable store arrays
+        idx, entries = _stable_to_arrays(self.stable_store)
+        arrays["stable_index"] = idx
+        arrays["stable_entries"] = entries
         meta = {
             "step_index": int(self._step_index),
             "global_seed": int(self._global_seed),
@@ -570,6 +580,9 @@ class SnnRunner:
         if "tile_bw_hist" in arrays:
             self.tile_bw._hist = arrays["tile_bw_hist"].astype(np.uint32)
         self.spike_counts = arrays.get("spike_counts", np.zeros(self.N, dtype=np.int32)).astype(np.int32)
+        # Restore stable store if present
+        if "stable_index" in arrays and "stable_entries" in arrays:
+            self.stable_store = _arrays_to_stable(arrays["stable_index"], arrays["stable_entries"])
         # Restore counters and seeds
         self._step_index = int(meta.get("step_index", self._step_index))
         self._global_seed = np.uint64(int(meta.get("global_seed", int(self._global_seed))))

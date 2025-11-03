@@ -268,6 +268,8 @@ def gen_block_events_batch(
     M: int,
     seeds: Sequence[int | np.uint64],
     delay_lut: np.ndarray | None = None,
+    *,
+    stable_store: object | None = None,
 ) -> List[Tuple[BlockEvent, int]]:
     """Batch wrapper that generates events for multiple presynaptic neurons.
 
@@ -294,6 +296,7 @@ def gen_block_events_batch(
             seed=np.uint64(seed),
             delay_lut=delay_lut,
             budget=None,
+            stable_store=stable_store,
         )
         for ev in evs:
             out.append((ev, ptile))
