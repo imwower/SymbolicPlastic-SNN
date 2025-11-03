@@ -85,17 +85,21 @@ def xorshift64star(seed: int) -> Iterator[int]:
 - 运行指定测试：`python -m unittest tests/test_simulator.py -v`。
 - 使用 `pytest`（可选）：`pytest -q` 或 `pytest tests/test_simulator.py -q`。
 
-项目结构与导入（无需打包，直接从仓库根导入）：
+项目结构与导入（统一包路径 `symbolicplastic_snn/*`）：
 
-- `core/` 事件驱动 LIF 模拟器与稀疏拓扑（CSR）
-- `topology/` 拓扑构建器与生成器
-- `plasticity/` 结构可塑性规则
-- `monitor/` 运行监控与指标
-- `readout/` 读出策略
-- `config/` 配置与加载
-- `tests/` 单元测试（unittest）
+- `symbolicplastic_snn/core` 固定点 LIF 内核（lif_step 等）
+- `symbolicplastic_snn/schedule` 时间轮与事件聚合
+- `symbolicplastic_snn/conn` 别名采样、置乱与连接生成器
+- `symbolicplastic_snn/realtime` 实时预算与排队
+- `symbolicplastic_snn/plasticity` 位窗统计、相关与重权
+- `symbolicplastic_snn/readout` 计数/提前终止读出
+- `symbolicplastic_snn/io` 快照与最小配置加载/校验
+- `symbolicplastic_snn/encode` 输入编码（Q0.16）
+- `symbolicplastic_snn/runner` 端到端 Runner
 
-示例导入：`from core.simulator import EventDrivenLIF`
+示例导入：`from symbolicplastic_snn.runner.loop import SnnRunner, RunnerConfig`
+
+注：仓库根下的 `core/`、`topology/`、`readout/`、`monitor/` 等为过渡期兼容包装，建议迁移到 `symbolicplastic_snn/*` 新路径。
 
 ## 数学模型（离散 LIF + 不应期 + 延迟）
 
