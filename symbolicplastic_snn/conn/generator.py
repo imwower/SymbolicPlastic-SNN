@@ -55,23 +55,35 @@ def gen_block_events(
     pre_id: int,
     step: int,
     pre_tile: int,
-    alias_tbl: AliasForTile,
+    alias_for_tile,
     tile_size: int,
     T_tiles: int = 32,
     M: int = 128,
-    seed: np.uint64 | int = 0,
+    seed: np.uint64 | int | None = None,
     delay_lut: np.ndarray | None = None,
     budget: EventBudget | None = None,
+    *,
+    # New API parameters (preferred):
+    seed_core: np.uint64 | int | None = None,
+    seed_flex: np.uint64 | int | None = None,
+    core_ratio: float = 0.8,
+    rng: callable | None = None,
 ) -> List[BlockEvent]:
     """Programmatically generate connectivity events for one pre tile.
 
-    Steps
-    1) Sample T_tiles post tiles with replacement, aggregate quotas per tile.
-    2) For each post tile: key = mix(pre_id, post_tile, step) → permute_first_m.
-    3) delay = delay_lut[pre_tile, post_tile] + jitter (0..JITTER_MAX) from seed.
-    4) Emit BlockEvent with indices and uniform k = quota, respecting optional budget.
+    Supports legacy and new APIs:
+    - Legacy: provide `alias_for_tile` as AliasForTile, `seed` (single), optional `budget`.
+    - New: provide `alias_for_tile` as (prob:uint16[], alias:int32[]), `seed_core`,
+      `seed_flex`, `core_ratio` (0..1), and `rng` for jitter (rng(size)->uint16 array).
 
-    Deterministic: all randomness derived from fixed SplitMix64 sequences.
+    Steps
+    1) Sample T_tiles post tiles with replacement via core/flex channels per core_ratio.
+       Aggregate quotas per tile by summing counts.
+    2) For each post tile: key = mix(pre_id, post_tile, step) → permute_first_m.
+    3) delay = delay_lut[pre_tile, post_tile] + jitter(rng) in [0, JITTER_MAX]; clip to uint8.
+    4) Emit BlockEvent with sorted unique indices and uniform k = quota (>=1).
+
+    Deterministic: all randomness derived from seeds and rng.
     """
     if tile_size <= 0:
         return []
@@ -82,14 +94,32 @@ def gen_block_events(
     if T_tiles <= 0:
         return []
 
-    # RNG for alias sampling and jitter, derived from seed + identifiers.
-    seed_val = int(np.uint64(seed))
-    seed_mix = (seed_val ^ (pre_id * 0x9E3779B1) ^ (pre_tile * 0xC2B2AE35) ^ (step * 0x165667B1)) & _MASK64
-    rng16 = _rng_uint16_from_seed(seed_mix)
+    # Unpack alias inputs
+    if isinstance(alias_for_tile, AliasForTile):
+        prob = alias_for_tile.prob
+        alias_idx = alias_for_tile.alias
+    else:
+        prob, alias_idx = alias_for_tile
+        prob = np.asarray(prob, dtype=np.uint16)
+        alias_idx = np.asarray(alias_idx, dtype=np.int32)
 
-    # 1) Sample post tiles
-    tiles = sample_alias(alias_tbl.prob, alias_tbl.alias, rng16, int(T_tiles))
-    # Aggregate quotas per tile
+    # RNGs for alias sampling: derive from provided seeds
+    if seed_core is None and seed_flex is None:
+        # Legacy path: derive from single seed if provided, else 0
+        seed_val = 0 if seed is None else int(np.uint64(seed))
+        seed_core = (seed_val ^ 0xD1342543DE82EF95) & _MASK64
+        seed_flex = (seed_val ^ 0x94D049BB133111EB) & _MASK64
+    core_n = int(max(0, min(T_tiles, int(T_tiles))))
+    # Determine split deterministically
+    c_n = int(max(0, min(T_tiles, int(float(core_ratio) * int(T_tiles)))))
+    f_n = int(T_tiles) - c_n
+    rng16_core = _rng_uint16_from_seed(int(np.uint64(seed_core)))
+    rng16_flex = _rng_uint16_from_seed(int(np.uint64(seed_flex)))
+
+    # 1) Sample post tiles via core and flex channels, then aggregate
+    tiles_core = sample_alias(prob, alias_idx, rng16_core, int(c_n)) if c_n > 0 else np.zeros(0, dtype=np.int32)
+    tiles_flex = sample_alias(prob, alias_idx, rng16_flex, int(f_n)) if f_n > 0 else np.zeros(0, dtype=np.int32)
+    tiles = np.concatenate((tiles_core, tiles_flex)) if (c_n + f_n) > 0 else np.zeros(0, dtype=np.int32)
     quota = Counter(tiles.tolist())
 
     # Deterministic order over unique post tiles
@@ -106,11 +136,13 @@ def gen_block_events(
 
     # For per-tile jitter, derive from RNG sequence by drawing one 64-bit value
     # via composing four 16-bit outputs for determinism.
+    # Jitter RNG uses provided rng if available, else derive from core seed
+    if rng is None:
+        rng = _rng_uint16_from_seed(int(np.uint64(seed_core)))
+
     def next_jitter() -> int:
-        # Compose jitter from next PRN
-        r = int(rng16(1)[0])
-        # Expand to small jitter 0..JITTER_MAX using upper bits
-        return int((r >> 13) & JITTER_MAX)
+        r = int(np.asarray(rng(1), dtype=np.uint16)[0])
+        return int(r % (JITTER_MAX + 1))
 
     for post_tile in unique_tiles:
         q = int(quota[post_tile])
@@ -124,6 +156,10 @@ def gen_block_events(
             base_delay = int(np.asarray(lut[pre_tile, post_tile]).item())
         jitter = next_jitter()
         delay = base_delay + jitter
+        if delay < 0:
+            delay = 0
+        if delay > 255:
+            delay = 255
 
         # Event cost
         cost = int(indices.size)
@@ -178,7 +214,7 @@ def gen_block_events_batch(
             pre_id=pid,
             step=step,
             pre_tile=ptile,
-            alias_tbl=alias,
+            alias_for_tile=alias,
             tile_size=int(tile_size),
             T_tiles=int(T_tiles),
             M=int(M),
