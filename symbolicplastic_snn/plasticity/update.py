@@ -194,8 +194,8 @@ def reseed_small_fraction(
     else:
         # Deterministic per-index selection via hash mapping to [0, 2^64)
         idx = np.arange(n, dtype=np.uint64)
-        # Compose a mixed value using 64-bit wrapping arithmetic
-        e = np.uint64(epoch) * np.uint64(0xC2B2AE3D27D4EB4F)
+        # Compose a mixed value using 64-bit wrapping arithmetic without numpy overflow warnings
+        e = np.uint64(((int(epoch) * 0xC2B2AE3D27D4EB4F) & ((1 << 64) - 1)))
         mixed = (sc ^ sf ^ (idx * np.uint64(0xD1342543DE82EF95)) ^ e).astype(np.uint64)
         # Apply hash64 elementwise
         # Vectorize via Python since np.vectorize returns object arrays; use list comprehension
