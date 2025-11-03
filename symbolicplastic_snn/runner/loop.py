@@ -31,6 +31,11 @@ class RunnerConfig:
     indices_per_event: int = 8
     slots: int = 8
     readout_window: int = 50
+    # Readout behavior
+    readout_max_future_gain_ratio: float = 0.3
+    readout_wta: bool = False
+    readout_wta_threshold: int = 1
+    readout_wta_inhibit: int = 1
     rate_max: float = 0.2
     theta: int = 4  # int16 threshold in Q domain used by LIF
     refractory_steps: int = 2
@@ -103,7 +108,17 @@ class SnnRunner:
         self.wheel = TimeWheel(slots=int(self.cfg.slots), bytes_cap=None)
 
         # Readout: two channels over halves by default
-        self.readout = Readout(ReadoutConfig(window=self.cfg.readout_window, early_exit=bool(self.cfg.early_exit)))
+        ro_cfg = ReadoutConfig(
+            window=int(self.cfg.readout_window),
+            early_exit=bool(self.cfg.early_exit),
+            max_future_gain_ratio=float(self.cfg.readout_max_future_gain_ratio),
+        )
+        # Optional WTA lateral inhibition
+        if bool(self.cfg.readout_wta):
+            ro_cfg.wta = True
+            ro_cfg.wta_threshold = int(self.cfg.readout_wta_threshold)
+            ro_cfg.wta_inhibit = int(self.cfg.readout_wta_inhibit)
+        self.readout = Readout(ro_cfg)
         ids0 = np.arange(0, self.N // 2, dtype=np.int32)
         ids1 = np.arange(self.N // 2, self.N, dtype=np.int32)
         self.readout.add_channel("C0", ids0)

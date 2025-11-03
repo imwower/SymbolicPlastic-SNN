@@ -19,6 +19,16 @@ def cfg_from_dict(d: Dict[str, Any]) -> RunnerConfig:
         readout = d.get("readout", {})
         if "window_steps" in readout:
             rc.readout_window = int(readout["window_steps"])
+        if "early_exit" in readout:
+            rc.early_exit = bool(readout["early_exit"])  # allow override here
+        if "max_future_gain_ratio" in readout:
+            rc.readout_max_future_gain_ratio = float(readout["max_future_gain_ratio"])
+        if "wta" in readout:
+            rc.readout_wta = bool(readout["wta"])
+        if "wta_threshold" in readout:
+            rc.readout_wta_threshold = int(readout["wta_threshold"])
+        if "wta_inhibit" in readout:
+            rc.readout_wta_inhibit = int(readout["wta_inhibit"])
         # Optional realtime budget
         if "realtime" in d and isinstance(d["realtime"], dict):
             rt = d["realtime"]
