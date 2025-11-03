@@ -356,7 +356,7 @@ readout:
 python scripts/run_local.py --steps 500 --save-prefix checkpoints/run1
 ```
 
-会生成 `checkpoints/run1_runner.bin`（二进制 + JSON 头）。
+会生成 `checkpoints/run1_runner.bin`（二进制 + JSON 头）。快照中包含 StableStore（稳定连接）的结构化数组（stable_index/stable_entries），可直接恢复。
 
 - 从快照继续运行，并可再次保存到新前缀：
 
@@ -371,6 +371,41 @@ python scripts/run_local.py --steps 500 --load-prefix checkpoints/run1 --save-pr
   - forbid_short_EE_loops: 禁止短 E→E 回路
   - min_ee_delay: 短回路最小延迟
   - drop_short_EE: 短回路事件直接丢弃（否则提升到最小延迟）
+
+### 稳定连接快照（StableStore 仅）
+
+当仅需保存/加载“固化知识”而不影响其他状态时，可使用独立的 StableStore 快照：
+
+Python 代码
+
+```python
+from symbolicplastic_snn.io.stable_snapshot import save_stable, load_stable
+from symbolicplastic_snn.plasticity.stable_store import StableStore
+
+save_stable("stable.bin", runner.stable_store)
+runner.stable_store = load_stable("stable.bin")
+```
+
+命令行
+
+```
+python scripts/run_local.py --steps 0 --save-stable stable.bin
+python scripts/run_local.py --steps 0 --load-stable stable.bin
+```
+
+### 全局检查点（含 StableStore）
+
+若需把 v/ref/seeds/alias 与 StableStore 一并保存为单文件，可使用：
+
+```python
+from symbolicplastic_snn.io.checkpoint import save_checkpoint, load_checkpoint
+
+alias = {"prob": runner.alias_corr_prob, "alias": some_alias_array}
+save_checkpoint("ckpt.bin", runner.v, runner.ref, runner.seeds_core, alias, runner.stable_store, {"step_index": runner._step_index})
+v, ref, seeds, alias2, stable, rng = load_checkpoint("ckpt.bin")
+```
+
+脚本 `run_local.py` 的 `--save-prefix/--load-prefix` 已包含 StableStore 在内的 Runner 快照；可与 `--save-stable/--load-stable` 配合使用。
 
 
 ## 默认超参速查表

@@ -10,6 +10,7 @@ from symbolicplastic_snn.core.prng import FloatRng
 
 from symbolicplastic_snn.io.config import load_yaml, validate_config
 from symbolicplastic_snn.runner.loop import SnnRunner, RunnerConfig
+from symbolicplastic_snn.io.stable_snapshot import save_stable, load_stable
 
 
 def cfg_from_dict(d: Dict[str, Any]) -> RunnerConfig:
@@ -95,8 +96,10 @@ def main() -> None:
     ap.add_argument("--config", type=str, default=None, help="Path to YAML/JSON config (optional)")
     ap.add_argument("--steps", type=int, default=1000, help="Number of steps to run")
     ap.add_argument("--seed", type=int, default=1234, help="Random seed for inputs and runner")
-    ap.add_argument("--save-prefix", type=str, default=None, help="Optional prefix to save runner state (core/explore)")
+    ap.add_argument("--save-prefix", type=str, default=None, help="Optional prefix to save runner state (includes stable store)")
     ap.add_argument("--load-prefix", type=str, default=None, help="Optional prefix to load runner state before running")
+    ap.add_argument("--save-stable", type=str, default=None, help="Optional path to save only StableStore snapshot")
+    ap.add_argument("--load-stable", type=str, default=None, help="Optional path to load StableStore snapshot before running")
     args = ap.parse_args()
 
     # Load config if provided
@@ -113,6 +116,11 @@ def main() -> None:
             runner.load_state(args.load_prefix)
         except Exception as e:
             print(f"Warning: failed to load state: {e}")
+    if args.load_stable:
+        try:
+            runner.stable_store = load_stable(args.load_stable)
+        except Exception as e:
+            print(f"Warning: failed to load stable store: {e}")
 
     rng = FloatRng(args.seed)
     for t in range(args.steps):
@@ -139,6 +147,11 @@ def main() -> None:
 
     if args.save_prefix:
         runner.save_state(args.save_prefix)
+    if args.save_stable:
+        try:
+            save_stable(args.save_stable, runner.stable_store)
+        except Exception as e:
+            print(f"Warning: failed to save stable store: {e}")
 
 
 if __name__ == "__main__":
