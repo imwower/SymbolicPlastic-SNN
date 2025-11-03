@@ -19,7 +19,7 @@ def _bias_alias_to_first_half(runner: SnnRunner) -> None:
     runner.alias_tbl = AliasForTile(prob=prob, alias=alias)
 
 
-def test_budget_enforced():
+def test_budget_enforced_defer_count():
     cfg = RunnerConfig(n_tiles=4, tile_size=8, indices_per_event=8, slots=8, readout_window=20, rate_max=1.0, theta=1, refractory_steps=1, budget_per_step=4, early_exit=False)
     runner = SnnRunner(cfg, seed=0)
     # Drive all inputs to guarantee spikes
@@ -29,7 +29,7 @@ def test_budget_enforced():
     assert runner.last_metrics["deferred_count"] > 0
 
 
-def test_priority_order():
+def test_priority_processing_order():
     cfg = RunnerConfig(n_tiles=4, tile_size=8, indices_per_event=4, slots=8, readout_window=20, rate_max=1.0, theta=1, refractory_steps=1, budget_per_step=4, early_exit=False)
     runner = SnnRunner(cfg, seed=1)
     # Bias alias so most events target first-half tiles (leader channel = 0 by default)
@@ -46,7 +46,16 @@ def test_priority_order():
     assert pbp[1] == 0 and pbp[2] == 0
 
 
-def test_early_exit_path():
+def test_metrics_exposed_step_time_and_deferred():
+    cfg = RunnerConfig(n_tiles=2, tile_size=8, indices_per_event=4, slots=6, readout_window=10, rate_max=1.0, theta=1, refractory_steps=1, budget_per_step=16, early_exit=True)
+    runner = SnnRunner(cfg, seed=2)
+    x = np.ones(runner.N, dtype=np.float32)
+    out = runner.step(x)
+    m = runner.last_metrics
+    assert "step_time_sec" in m and m["step_time_sec"] >= 0.0
+    assert "deferred_count" in m and m["deferred_count"] >= 0
+
+    # Keep legacy early-exit assertion
     cfg = RunnerConfig(n_tiles=2, tile_size=8, indices_per_event=4, slots=6, readout_window=10, rate_max=1.0, theta=1, refractory_steps=1, budget_per_step=16, early_exit=True)
     runner = SnnRunner(cfg, seed=2)
     # Step with high input to latch earliest label and trigger early-exit

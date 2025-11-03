@@ -28,6 +28,11 @@ class EventBudget:
             raise ValueError("cost must be non-negative")
         self.used += int(cost)
 
+    @property
+    def remaining(self) -> int:
+        """Return remaining budget for this step (non-negative)."""
+        rem = int(self.b_step) - int(self.used)
+        return rem if rem >= 0 else 0
+
 
 __all__ = ["EventBudget"]
-
