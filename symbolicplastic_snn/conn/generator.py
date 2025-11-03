@@ -68,6 +68,7 @@ def gen_block_events(
     seed_flex: np.uint64 | int | None = None,
     core_ratio: float = 0.8,
     rng: callable | None = None,
+    stable_store: object | None = None,
 ) -> List[BlockEvent]:
     """Programmatically generate connectivity events for one pre tile.
 
@@ -116,6 +117,34 @@ def gen_block_events(
     rng16_core = _rng_uint16_from_seed(int(np.uint64(seed_core)))
     rng16_flex = _rng_uint16_from_seed(int(np.uint64(seed_flex)))
 
+    # 0) Inject stable connections (group by (post_tile, delay), sum k per local index)
+    stable_groups: dict[tuple[int, int], dict[int, int]] = {}
+    included_stable: set[tuple[int, int]] = set()
+    if stable_store is not None and hasattr(stable_store, "get_pre"):
+        try:
+            edges = list(stable_store.get_pre(int(pre_id)))
+        except Exception:
+            edges = []
+        for e in edges:
+            post_id = int(getattr(e, "post_id"))
+            delay_e = int(getattr(e, "delay"))
+            post_tile_e = post_id // int(tile_size)
+            local_idx = post_id % int(tile_size)
+            key = (post_tile_e, delay_e)
+            g = stable_groups.get(key)
+            if g is None:
+                g = {}
+                stable_groups[key] = g
+            g[local_idx] = g.get(local_idx, 0) + 1
+        # Apply budget for stable groups first (priority)
+        for key, g in stable_groups.items():
+            cnt = len(g)
+            if budget is not None and not budget.allow(cnt):
+                continue
+            if budget is not None:
+                budget.charge(cnt)
+            included_stable.add(key)
+
     # 1) Sample post tiles via core and flex channels, then aggregate
     tiles_core = sample_alias(prob, alias_idx, rng16_core, int(c_n)) if c_n > 0 else np.zeros(0, dtype=np.int32)
     tiles_flex = sample_alias(prob, alias_idx, rng16_flex, int(f_n)) if f_n > 0 else np.zeros(0, dtype=np.int32)
@@ -160,22 +189,66 @@ def gen_block_events(
             delay = 0
         if delay > 255:
             delay = 255
+        key2 = (int(post_tile), int(delay))
+        # Merge with stable group if present (avoid duplicate indices). Overlaps -> k += 1
+        if key2 in included_stable:
+            g = stable_groups[key2]
+            # Determine indices to add from variable selection respecting budget
+            added = []
+            for idx in indices.tolist():
+                if idx in g:
+                    # variable quota contributes q more connections to this index
+                    g[idx] = int(g[idx]) + int(q)
+                else:
+                    added.append(int(idx))
+            # Apply budget for new indices only
+            add_cnt = len(added)
+            if add_cnt > 0:
+                if budget is None or budget.allow(add_cnt):
+                    if budget is not None:
+                        budget.charge(add_cnt)
+                    for v in added:
+                        g[v] = int(q)  # variable quota contributes q for new entries
+                else:
+                    # Add as much as budget allows deterministically
+                    can = budget.remaining if budget is not None else 0
+                    if can > 0:
+                        take = added[:can]
+                        for v in take:
+                            g[v] = int(q)
+                        if budget is not None:
+                            budget.charge(len(take))
+            # No separate event appended; this group will be finalized later
+        else:
+            # No stable group; create a fresh event if budget allows
+            cost = int(indices.size)
+            if budget is not None and not budget.allow(cost):
+                continue
+            if budget is not None:
+                budget.charge(cost)
+            k = np.full(indices.shape[0], q, dtype=np.int16)
+            events.append(
+                BlockEvent(
+                    post_tile=int(post_tile),
+                    indices=indices,
+                    k=k,
+                    delay=int(delay),
+                )
+            )
 
-        # Event cost
-        cost = int(indices.size)
-        if budget is not None:
-            if not budget.allow(cost):
-                break
-            budget.charge(cost)
-
-        # Strength vector: each chosen index gets k = quota
-        k = np.full(indices.shape[0], q, dtype=np.int16)
+    # Finalize included stable groups as BlockEvents
+    for (pt, dly) in included_stable:
+        g = stable_groups[(pt, dly)]
+        if not g:
+            continue
+        idx_sorted = np.array(sorted(g.keys()), dtype=np.int32)
+        kk = np.array([int(g[i]) for i in idx_sorted.tolist()], dtype=np.int16)
         events.append(
             BlockEvent(
-                post_tile=int(post_tile),
-                indices=indices,
-                k=k,
-                delay=int(delay),
+                post_tile=int(pt),
+                indices=idx_sorted,
+                k=kk,
+                delay=int(dly),
             )
         )
 
