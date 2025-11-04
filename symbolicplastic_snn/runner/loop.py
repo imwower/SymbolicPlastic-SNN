@@ -29,7 +29,7 @@ from symbolicplastic_snn.io.snapshot import (
     load_runner_snapshot,
 )
 from dataclasses import asdict
-from symbolicplastic_snn.utils.prng import SeedSpace
+from symbolicplastic_snn.utils.prng import SeedSpace, Stream
 
 
 @dataclass
@@ -106,6 +106,8 @@ class SnnRunner:
         self._global_seed = np.uint64(seed)
         # SeedSpace for modular streams (available to call sites)
         self.seed_space = SeedSpace(int(self._global_seed))
+        # Active PRNG streams (name -> Stream) for snapshot continuity
+        self._active_streams: dict[str, Stream] = {}
 
         # State
         self.v = np.zeros(self.N, dtype=np.int16)
@@ -231,7 +233,7 @@ class SnnRunner:
                 pre_ids_vec = spk_idx.astype(np.int32)
                 pre_tiles_vec = (pre_ids_vec // self.tile_size).astype(np.int32)
                 # Prepare jitter RNGs derived from SeedSpace per pre neuron and step
-                def _rng16_from_stream(stream):
+                def _rng16_from_stream(stream: Stream):
                     def rng(size: int):
                         n = int(size)
                         out = np.empty(n, dtype=np.uint16)
@@ -239,28 +241,21 @@ class SnnRunner:
                             out[i] = np.uint16((stream.u64() >> 48) & 0xFFFF)
                         return out
                     return rng
-                rng_core = [
-                    _rng16_from_stream(
-                        self.seed_space.derive(
-                            "module=topology",
-                            f"channel=core",
-                            f"pre={int(pid)}",
-                            f"step={int(self._step_index)}",
-                        )
-                    )
-                    for pid in pre_ids_vec
-                ]
-                rng_exp = [
-                    _rng16_from_stream(
-                        self.seed_space.derive(
-                            "module=topology",
-                            f"channel=explore",
-                            f"pre={int(pid)}",
-                            f"step={int(self._step_index)}",
-                        )
-                    )
-                    for pid in pre_ids_vec
-                ]
+                def _get_stream(name: str, *keys: str) -> Stream:
+                    s = self._active_streams.get(name)
+                    if s is None:
+                        s = self.seed_space.derive(*keys)
+                        self._active_streams[name] = s
+                    return s
+                rng_core = []
+                rng_exp = []
+                for pid in pre_ids_vec:
+                    name_c = f"topology:core:pre={int(pid)}:step={int(self._step_index)}"
+                    st_c = _get_stream(name_c, "module=topology", "channel=core", f"pre={int(pid)}", f"step={int(self._step_index)}")
+                    rng_core.append(_rng16_from_stream(st_c))
+                    name_e = f"topology:explore:pre={int(pid)}:step={int(self._step_index)}"
+                    st_e = _get_stream(name_e, "module=topology", "channel=explore", f"pre={int(pid)}", f"step={int(self._step_index)}")
+                    rng_exp.append(_rng16_from_stream(st_e))
                 # Core path
                 if T_core > 0:
                     alias_list_core = [self._get_alias_for(int(t), mode="core") for t in pre_tiles_vec]
@@ -731,11 +726,14 @@ class SnnRunner:
         idx, entries = _stable_to_arrays(self.stable_store)
         arrays["stable_index"] = idx
         arrays["stable_entries"] = entries
+        # Snapshot PRNG active streams as name->state mapping
+        rng_streams = {name: int(stream.get_state()) for name, stream in self._active_streams.items()}
         meta = {
             "step_index": int(self._step_index),
             "global_seed": int(self._global_seed),
             "alias_version": int(self._alias_version),
             "config": asdict(self.cfg),
+            "rng_streams": rng_streams,
         }
         save_runner_snapshot(f"{prefix}_runner.bin", arrays, meta)
 
@@ -760,6 +758,15 @@ class SnnRunner:
         # Invalidate caches to rebuild lazily
         self._alias_cache_core.clear()
         self._alias_cache_explore.clear()
+        # Restore PRNG active streams if present
+        self._active_streams = {}
+        rs = meta.get("rng_streams", {}) or {}
+        if isinstance(rs, dict):
+            for name, st in rs.items():
+                # Recreate dummy stream and set state (sufficient for continuity)
+                s = Stream(1)
+                s.set_state(int(st))
+                self._active_streams[str(name)] = s
 
     def run(self, X_T: Iterable[np.ndarray]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         out: Optional[Dict[str, Any]] = None
