@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import math
-import random
 from dataclasses import dataclass
 from typing import Iterable, List, Sequence, Tuple
 
 from core.simulator import SynapseTopology
+from symbolicplastic_snn.utils.prng import Stream
 
 Coords = Sequence[Tuple[float, float]]
 Layers = Sequence[int]
@@ -58,14 +58,14 @@ class SmallWorldSampler:
         layers: Layers,
         params: TopologyParams,
         *,
-        rng: random.Random | None = None,
+        rng: object | None = None,
     ):
         if len(coords) != len(layers):
             raise ValueError("coords and layers length must match")
         self.coords = list(coords)
         self.layers = list(layers)
         self.params = params
-        self.rng = rng or random.Random()
+        self.rng = rng or Stream(0)
         self._candidates = self._build_candidate_table()
 
     def _build_candidate_table(self) -> List[List[Tuple[int, float, float]]]:
@@ -109,7 +109,14 @@ class SmallWorldSampler:
             total = sum(weight for _, weight, _ in available)
             if total <= 0:
                 break
-            pick = self.rng.random() * total
+            # RNG: support both Python random.Random and PRNG Stream
+            if hasattr(self.rng, "random") and callable(getattr(self.rng, "random")):
+                u = float(self.rng.random())
+            elif hasattr(self.rng, "uniform") and callable(getattr(self.rng, "uniform")):
+                u = float(self.rng.uniform())
+            else:
+                u = float(Stream(0).uniform())
+            pick = u * total
             cumulative = 0.0
             for idx, (pre, weight, distance) in enumerate(available):
                 cumulative += weight
@@ -134,7 +141,7 @@ def build_small_world_topology(
     layers: Layers,
     params: TopologyParams,
     *,
-    rng: random.Random | None = None,
+    rng: object | None = None,
 ) -> SynapseTopology:
     """Constructs a SynapseTopology following README heuristics."""
     sampler = SmallWorldSampler(coords, layers, params, rng=rng)

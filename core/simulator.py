@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import math
-import random
 from collections import deque
 from dataclasses import dataclass
 from typing import Iterable, List, Sequence, Tuple
+from symbolicplastic_snn.utils.prng import Stream
 
 
 @dataclass
@@ -157,14 +157,21 @@ class EventDrivenLIF:
         self.time_step = 0
 
     def seed_from_noise(
-        self, *, rate_hz: float, rng: random.Random | None = None
+        self, *, rate_hz: float, rng: object | None = None
     ) -> List[int]:
         """Draw a set of active neurons using a Poisson rate approximation."""
         if rate_hz < 0:
             raise ValueError("rate_hz must be non-negative")
-        rng = rng or random.Random()
+        rng = rng or Stream(0)
         prob = min(rate_hz * (self.dt_ms / 1000.0), 1.0)
-        return [idx for idx in range(self.num_neurons) if rng.random() < prob]
+        def _uniform_one(r):
+            if hasattr(r, "random") and callable(getattr(r, "random")):
+                return float(r.random())
+            if hasattr(r, "uniform") and callable(getattr(r, "uniform")):
+                return float(r.uniform())
+            # Fallback via Stream if mis-specified
+            return float(Stream(0).uniform())
+        return [idx for idx in range(self.num_neurons) if _uniform_one(rng) < prob]
 
     def step(self, active_set: Iterable[int]) -> StepResult:
         """Advance the simulator by one step using only the provided active neurons."""
