@@ -213,3 +213,95 @@ class Readout:
 
 
 __all__ = ["ReadoutConfig", "Readout"]
+
+
+# ---- Optional sliding-window readout (minimal API) ----
+
+@dataclass
+class ReadoutState:
+    """Sliding-window readout state.
+
+    - counts: int32 per-class counts in the current window
+    - step: total steps processed
+    - stable_steps: consecutive steps where the same class remains on top
+    """
+
+    counts: np.ndarray
+    step: int = 0
+    stable_steps: int = 0
+    _hist: np.ndarray | None = None  # ring buffer of last window classes (-1 means none)
+    _ptr: int = 0
+    _last_pred: int | None = None
+
+
+@dataclass
+class WindowReadoutConfig:
+    """Config for simple window readout.
+
+    - window_steps: window length (>=1)
+    - threshold: halt threshold for max count
+    - hold_steps: consecutive steps above threshold to halt
+    """
+
+    window_steps: int
+    threshold: int
+    hold_steps: int = 0
+
+
+def init_state(num_classes: int, cfg: WindowReadoutConfig) -> ReadoutState:
+    if int(num_classes) <= 0:
+        raise ValueError("num_classes must be positive")
+    if int(cfg.window_steps) <= 0:
+        raise ValueError("window_steps must be >= 1")
+    counts = np.zeros(int(num_classes), dtype=np.int32)
+    hist = np.full(int(cfg.window_steps), -1, dtype=np.int32)
+    return ReadoutState(counts=counts, step=0, stable_steps=0, _hist=hist, _ptr=0, _last_pred=None)
+
+
+def update(state: ReadoutState, spike_class: int | None) -> ReadoutState:
+    """Update state with optional spiking class using FIFO window.
+
+    For simplicity, approximate window by exponentially decaying counts:
+    counts = counts - floor(counts / window) + one_hot(spike_class)
+    Deterministic and bounded.
+    """
+    counts = state.counts.astype(np.int32, copy=True)
+    hist = state._hist
+    if hist is None:
+        raise ValueError("state not initialized with history buffer")
+    ptr = int(state._ptr)
+    # Remove leaving class
+    old = int(hist[ptr])
+    if old >= 0:
+        counts[old] = max(0, int(counts[old]) - 1)
+    # Insert new class
+    if spike_class is None:
+        hist[ptr] = -1
+    else:
+        k = int(spike_class)
+        if k < 0 or k >= counts.size:
+            raise ValueError("spike_class out of range")
+        hist[ptr] = k
+        counts[k] = int(counts[k]) + 1
+    ptr = (ptr + 1) % hist.size
+    # Update stable_steps based on current top
+    pred = int(np.argmax(counts)) if int(counts.max()) > 0 else None
+    if pred is not None and state._last_pred is not None and pred == int(state._last_pred):
+        stable = int(state.stable_steps) + 1
+    else:
+        stable = 1 if pred is not None else 0
+    return ReadoutState(counts=counts, step=int(state.step) + 1, stable_steps=stable, _hist=hist, _ptr=ptr, _last_pred=pred)
+
+
+def decide(state: ReadoutState, cfg: WindowReadoutConfig) -> Tuple[int | None, bool]:
+    if state.counts.size == 0:
+        raise ValueError("empty counts")
+    top = int(np.max(state.counts))
+    pred = int(np.argmax(state.counts)) if top > 0 else None
+    halted = False
+    if pred is not None and top >= int(cfg.threshold):
+        halted = True if int(cfg.hold_steps) <= 0 else (state.stable_steps >= int(cfg.hold_steps))
+    return pred, halted
+
+
+__all__.extend(["ReadoutState", "WindowReadoutConfig", "init_state", "update", "decide"])

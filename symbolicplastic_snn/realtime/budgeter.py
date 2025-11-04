@@ -36,3 +36,39 @@ class EventBudget:
 
 
 __all__ = ["EventBudget"]
+
+
+# ---- Optional simple budgeter with carry ----
+
+@dataclass
+class Budgeter:
+    """Simple per-step budget with carry and saturation.
+
+    - per_step: maximum tokens that can be spent per step.
+    - carry: unspent tokens carried to next step (capped at per_step).
+    """
+
+    per_step: int
+    carry: int = 0
+
+
+def admit(b: Budgeter, demand: int) -> tuple[int, Budgeter]:
+    """Admit up to available tokens for this step given a demand.
+
+    Returns (granted, new_budgeter). Carry saturates at per_step.
+    """
+    avail = int(b.per_step) + max(0, int(b.carry))
+    need = max(0, int(demand))
+    grant = min(avail, need)
+    remaining = avail - grant
+    # Carry is what remains, but not exceeding per_step
+    new_carry = min(int(b.per_step), remaining)
+    return grant, Budgeter(per_step=int(b.per_step), carry=new_carry)
+
+
+def reset(b: Budgeter) -> Budgeter:
+    """Reset carry to 0 for a fresh budgeting cycle."""
+    return Budgeter(per_step=int(b.per_step), carry=0)
+
+
+__all__.extend(["Budgeter", "admit", "reset"])

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Callable, Tuple
 
 import numpy as np
+from symbolicplastic_snn.utils.prng import Stream
 
 
 def rate_encode(x: np.ndarray, rate_max: float, rng) -> np.ndarray:
@@ -64,3 +65,78 @@ def rate_encode_q016(x_q: np.ndarray, rng_uint16: Callable[[int], np.ndarray]) -
     return r < xq
 
 __all__.extend(["rate_encode_q016"])
+
+
+def constant_q16(value: float, scale: float) -> np.uint16:
+    """Encode a constant float value into Q0.16 with scaling.
+
+    result = clip(round(value * scale * 65535), 0, 65535) as int16
+
+    Examples
+    >>> constant_q16(0.5, 1.0)
+    np.int16(32768)
+    """
+    v = float(value) * float(scale)
+    q = int(round(max(0.0, min(1.0, v)) * 65536.0))
+    if q < 0:
+        q = 0
+    if q > 65535:
+        q = 65535
+    return np.uint16(q)
+
+
+def piecewise_linear(x: float, knots: np.ndarray, values: np.ndarray) -> np.uint16:
+    """Piecewise-linear mapping of x to Q0.16 given knots and values.
+
+    - knots: strictly increasing float array
+    - values: same length, in [0,1]
+    """
+    xs = float(x)
+    k = np.asarray(knots, dtype=np.float64)
+    v = np.asarray(values, dtype=np.float64)
+    if k.ndim != 1 or v.ndim != 1 or k.size != v.size or k.size == 0:
+        raise ValueError("knots and values must be 1-D and same non-zero length")
+    if np.any(k[1:] <= k[:-1]):
+        raise ValueError("knots must be strictly increasing")
+    # Clamp to endpoints
+    if xs <= k[0]:
+        y = v[0]
+    elif xs >= k[-1]:
+        y = v[-1]
+    else:
+        idx = int(np.searchsorted(k, xs))
+        x0, x1 = k[idx - 1], k[idx]
+        y0, y1 = v[idx - 1], v[idx]
+        t = (xs - x0) / (x1 - x0)
+        y = (1.0 - t) * y0 + t * y1
+    y = max(0.0, min(1.0, float(y)))
+    return np.uint16(int(round(y * 65536.0)) if y < 1.0 else 65535)
+
+
+def poisson_spikes(rate_hz: float, dt_ms: float, stream: Stream) -> bool:
+    """Poisson spike decision using Stream.uniform().
+
+    Returns True with probability p = min(rate_hz * dt_ms / 1000, 1.0).
+    """
+    if rate_hz < 0 or dt_ms <= 0:
+        raise ValueError("rate_hz must be >= 0 and dt_ms > 0")
+    p = rate_hz * (dt_ms / 1000.0)
+    p = max(0.0, min(1.0, float(p)))
+    return bool(stream.uniform() < p)
+
+
+def ratio_norm(x: float, lo: float, hi: float) -> np.uint16:
+    """Map x in [lo, hi] to Q0.16 linearly.
+
+    Clips outside range. If hi == lo, returns 0.
+    """
+    lo2 = float(lo)
+    hi2 = float(hi)
+    if hi2 <= lo2:
+        return np.int16(0)
+    t = (float(x) - lo2) / (hi2 - lo2)
+    t = max(0.0, min(1.0, t))
+    return np.uint16(int(round(t * 65536.0)) if t < 1.0 else 65535)
+
+
+__all__.extend(["constant_q16", "piecewise_linear", "poisson_spikes", "ratio_norm"])

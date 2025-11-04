@@ -284,6 +284,58 @@ class TimeWheel:
         return cnt
 
 
+# ---- Optional simple event wheel (non-intrusive) ----
+from typing import Any
+
+
+@dataclass
+class Event:
+    """Basic scheduled event.
+
+    - when: absolute tick within the wheel (0..wheel_size-1)
+    - payload: arbitrary object
+    - seq: global sequence number for stable ordering within the same tick
+    """
+
+    when: int
+    payload: Any
+    seq: int
+
+
+class EventWheel:
+    """Deterministic cyclic time wheel for Event scheduling.
+
+    API: schedule(delay,payload)->seq; tick()->list[Event] ordered by (when,seq).
+    """
+
+    def __init__(self, wheel_size: int) -> None:
+        if int(wheel_size) <= 0:
+            raise ValueError("wheel_size must be >= 1")
+        self.wheel_size = int(wheel_size)
+        self.current = 0
+        self._seq = 0
+        self._buckets: list[list[Event]] = [[] for _ in range(self.wheel_size)]
+
+    def schedule(self, delay: int, payload: Any) -> int:
+        if int(delay) < 0:
+            raise ValueError("delay must be >= 0")
+        seq = self._seq
+        self._seq += 1
+        when = (self.current + int(delay)) % self.wheel_size
+        ev = Event(when=when, payload=payload, seq=seq)
+        self._buckets[when].append(ev)
+        return seq
+
+    def tick(self) -> list[Event]:
+        bucket = self._buckets[self.current]
+        out = sorted(bucket, key=lambda e: (int(e.when), int(e.seq))) if bucket else []
+        self._buckets[self.current] = []
+        self.current = (self.current + 1) % self.wheel_size
+        return out
+
+    
+
+
 def normalize_block_event(event: BlockEvent) -> BlockEvent:
     """Return a normalized copy of BlockEvent with constraints enforced.
 

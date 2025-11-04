@@ -4,6 +4,7 @@ from typing import Callable, Tuple
 from dataclasses import dataclass
 
 import numpy as np
+from symbolicplastic_snn.utils.prng import Stream
 
 
 def prefix_sum_uint16(a: np.ndarray) -> np.ndarray:
@@ -240,6 +241,139 @@ __all__ = [
     "prefix_sum_uint16",
     "AliasForTile",
 ]
+
+
+def build_alias_table(p: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Build an alias table from positive weights using Vose's method.
+
+    Parameters
+    - p: 1-D float array of non-negative weights. At least one element must be > 0.
+
+    Returns
+    - (prob, alias):
+      * prob: float64 ndarray thresholds in [0, 1)
+      * alias: int32 ndarray of alias indices
+
+    Notes
+    - O(n) build time; O(1) sampling.
+    - Numerical stability: normalize weights to sum=1.0; thresholds kept in [0,1) for robust comparison with `Stream.uniform()`.
+    - Raises ValueError on invalid inputs (negative weights, all zero, wrong shape).
+    """
+    w = np.asarray(p, dtype=np.float64)
+    if w.ndim != 1:
+        raise ValueError("p must be 1-D")
+    if w.size == 0:
+        raise ValueError("p must be non-empty")
+    if np.any(w < 0.0):
+        raise ValueError("p must be non-negative")
+    s = float(w.sum())
+    if s <= 0.0:
+        raise ValueError("sum of p must be > 0")
+    n = w.size
+    prob = np.zeros(n, dtype=np.float64)
+    alias = np.arange(n, dtype=np.int32)
+    scaled = (w / s) * n
+    small: list[int] = []
+    large: list[int] = []
+    for i in range(n):
+        if scaled[i] < 1.0:
+            small.append(i)
+        elif scaled[i] > 1.0:
+            large.append(i)
+        else:
+            prob[i] = 1.0
+            alias[i] = np.int32(i)
+    while small and large:
+        i = small.pop()
+        j = large.pop()
+        prob[i] = float(scaled[i])
+        alias[i] = np.int32(j)
+        scaled[j] = (scaled[j] - (1.0 - scaled[i]))
+        if scaled[j] < 1.0 - 1e-18:
+            small.append(j)
+        elif scaled[j] > 1.0 + 1e-18:
+            large.append(j)
+        else:
+            prob[j] = 1.0
+            alias[j] = np.int32(j)
+    for i in small:
+        prob[i] = 1.0
+        alias[i] = np.int32(i)
+    for j in large:
+        prob[j] = 1.0
+        alias[j] = np.int32(j)
+    return prob, alias
+
+
+def sample_alias_stream(
+    prob: np.ndarray,
+    alias: np.ndarray,
+    stream: Stream,
+    size: int | None = None,
+) -> np.ndarray | int:
+    """Sample from a float-threshold alias table using a Stream.
+
+    Parameters
+    - prob: float64 thresholds in [0,1) (from build_alias_table) or uint16 thresholds (legacy support).
+    - alias: int32 alias indices
+    - stream: Stream (xorshift64* based) used for deterministic sampling
+    - size: optional number of samples. If None, returns a single int.
+
+    Returns np.ndarray of dtype int32 if size is given, else a single int.
+    """
+    if alias.dtype != np.int32:
+        raise TypeError("alias must be int32 ndarray")
+    n = int(alias.shape[0])
+    if n <= 0:
+        raise ValueError("alias table must be non-empty")
+    if size is None:
+        col = int(stream.randbelow(n))
+        if prob.dtype == np.float64:
+            return int(col if stream.uniform() < float(prob[col]) else int(alias[col]))
+        if prob.dtype == np.uint16:
+            u = int(stream.randbelow(65536))
+            return int(col if u < int(prob[col]) else int(alias[col]))
+        raise TypeError("prob must be float64 or uint16")
+    m = int(size)
+    if m < 0:
+        raise ValueError("size must be non-negative")
+    out = np.empty(m, dtype=np.int32)
+    if prob.dtype == np.float64:
+        for i in range(m):
+            col = int(stream.randbelow(n))
+            out[i] = np.int32(col if stream.uniform() < float(prob[col]) else int(alias[col]))
+        return out
+    if prob.dtype == np.uint16:
+        for i in range(m):
+            col = int(stream.randbelow(n))
+            u = int(stream.randbelow(65536))
+            out[i] = np.int32(col if u < int(prob[col]) else int(alias[col]))
+        return out
+    raise TypeError("prob must be float64 or uint16")
+
+
+class AliasSampler:
+    """Alias sampler with cached tables.
+
+    Use from_weights(weights) to construct, then sample(stream, n) to draw indices.
+    Deterministic given a Stream. O(1) per sample.
+    """
+
+    def __init__(self, prob: np.ndarray, alias_idx: np.ndarray) -> None:
+        self.prob = np.asarray(prob, dtype=np.float64)
+        self.alias = np.asarray(alias_idx, dtype=np.int32)
+        if self.prob.ndim != 1 or self.alias.ndim != 1 or self.prob.size != self.alias.size:
+            raise ValueError("prob and alias must be 1-D of same length")
+
+    @classmethod
+    def from_weights(cls, weights: np.ndarray) -> "AliasSampler":
+        prob, alias = build_alias_table(weights)
+        return cls(prob, alias)
+
+    def sample(self, stream: Stream, n: int) -> np.ndarray:
+        return sample_alias_stream(self.prob, self.alias, stream, int(n))
+
+__all__.extend(["build_alias_table", "sample_alias_stream", "AliasSampler"])
 
 
 @dataclass
