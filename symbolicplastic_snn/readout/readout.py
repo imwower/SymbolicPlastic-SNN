@@ -48,6 +48,15 @@ class Readout:
         # Latching for earliest-time-wins
         self._latched_idx: int | None = None
         self._latency: int | None = None
+        # Optional RNG for tie-breaking (deterministic via SeedSpace-derived Stream)
+        self._tie_rng: object | None = None
+
+    def set_tie_rng(self, rng: object) -> None:
+        """Set a deterministic RNG for tie-breaking among equal scores.
+
+        Expected interface: has method randbelow(n:int)->int or randint(a,b)->int or uniform()->float.
+        """
+        self._tie_rng = rng
 
     # ------------- Public API -------------
     def add_channel(self, name: str, neuron_ids: np.ndarray) -> None:
@@ -97,8 +106,30 @@ class Readout:
         if self._latched_idx is None:
             pos = np.nonzero(step_counts > 0)[0]
             if pos.size > 0:
-                # Pick the channel with largest count this step; tie -> lowest index
-                best = int(pos[np.argmax(step_counts[pos])])
+                # Pick the channel with largest count this step; tie -> RNG if available else lowest index
+                vals = step_counts[pos]
+                top = int(vals.max())
+                cand = pos[vals == top]
+                if cand.size == 1 or self._tie_rng is None:
+                    best = int(cand[0])
+                else:
+                    # Try randbelow, else randint, else uniform
+                    r = self._tie_rng
+                    j = None
+                    if hasattr(r, "randbelow"):
+                        j = int(r.randbelow(int(cand.size)))  # type: ignore[attr-defined]
+                    elif hasattr(r, "randint"):
+                        j = int(r.randint(0, int(cand.size)))  # exclusive upper not guaranteed; clamp below
+                        if j >= int(cand.size):
+                            j = int(cand.size) - 1
+                    elif hasattr(r, "uniform"):
+                        u = float(r.uniform())
+                        j = int(u * int(cand.size))
+                        if j >= int(cand.size):
+                            j = int(cand.size) - 1
+                    else:
+                        j = 0
+                    best = int(cand[j])
                 self._latched_idx = best
                 self._latency = self._step_idx  # 1-based steps
 
@@ -138,7 +169,27 @@ class Readout:
             label_idx = self._latched_idx
             latency = int(self._latency if self._latency is not None else -1)
         else:
-            label_idx = int(np.argmax(counts))
+            # Use RNG tie-break if provided
+            top = int(counts.max()) if counts.size > 0 else 0
+            cand = np.nonzero(counts == top)[0]
+            if cand.size <= 1 or self._tie_rng is None:
+                label_idx = int(cand[0]) if cand.size > 0 else 0
+            else:
+                r = self._tie_rng
+                if hasattr(r, "randbelow"):
+                    j = int(r.randbelow(int(cand.size)))  # type: ignore[attr-defined]
+                elif hasattr(r, "randint"):
+                    j = int(r.randint(0, int(cand.size)))
+                    if j >= int(cand.size):
+                        j = int(cand.size) - 1
+                elif hasattr(r, "uniform"):
+                    u = float(r.uniform())
+                    j = int(u * int(cand.size))
+                    if j >= int(cand.size):
+                        j = int(cand.size) - 1
+                else:
+                    j = 0
+                label_idx = int(cand[j]) if cand.size > 0 else 0
             latency = -1
 
         scores = {self._names[i]: int(counts[i]) for i in range(C)}

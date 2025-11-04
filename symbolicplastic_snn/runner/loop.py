@@ -149,6 +149,15 @@ class SnnRunner:
         ids1 = np.arange(self.N // 2, self.N, dtype=np.int32)
         self.readout.add_channel("C0", ids0)
         self.readout.add_channel("C1", ids1)
+        # Set tie-breaking RNG for readout (deterministic via SeedSpace)
+        try:
+            st = self._active_streams.get("readout:tie")
+            if st is None:
+                st = self.seed_space.derive("module=readout", "tie")
+                self._active_streams["readout:tie"] = st
+            self.readout.set_tie_rng(st)
+        except Exception:
+            pass
 
         # LIF config and parameters
         self.lif_cfg = ConfigFp(refractory_steps=int(self.cfg.refractory_steps))
