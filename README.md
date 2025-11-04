@@ -8,7 +8,7 @@
 - 默认技术栈：Python 3.11 + NumPy（纯 CPU，便于快速集成与测试；后续可替换为 C++/Rust 内核）
 - 依赖约束：仅允许 `numpy`、`pytest`；禁止其他外部依赖
 - 代码风格：PEP8 + 类型标注 + `dataclasses`，纯函数优先
-- 统一 PRNG：`xorshift64*`（内置实现），相同 seed + 相同输入 → 完全确定性
+- 统一 PRNG：使用 SplitMix64 仅用于播种（seeding），工作流采用 `xorshift64*` 生成；相同 run_seed + 相同键（key）→ 完全确定性、模块解耦
 - 固定点默认格式：
   - 膜电位 `v`、阈值 `θ`：`int16`（Q4.11）
   - 泄露 `λ`：`uint16`（Q1.15）
@@ -36,9 +36,11 @@ tests/
   ...（与模块一一对应）
 ```
 
-统一 PRNG（xorshift64*）说明：
+统一 PRNG（SplitMix64 + xorshift64*）说明：
 
-- 内置实现，所有随机过程（拓扑、别名采样、抖动等）统一调用；确保相同 seed + 相同输入下完全确定性。
+- 规则：SplitMix64 仅用于播种 + xorshift64* 作为工作流生成器；禁止使用 `numpy.random` 或 `random`。
+- 派生：`seed = SplitMix64( SplitMix64(run_seed) XOR FNV64(keys...) )`，其中 keys 为稳定字符串，如 `"module=topology"`, `"layer=2"`, `"pre=42->post=7"`。
+- 好处：稳定（测试可复现）、可组合（模块顺序无关）、可快照恢复（保存 64-bit 内部状态）。
 - 参考实现（Python 伪代码）：
 
 ```python
@@ -57,6 +59,28 @@ def xorshift64star(seed: int) -> Iterator[int]:
         x ^= (x >> 27) & 0xFFFFFFFFFFFFFFFF
         y = (x * 0x2545F4914F6CDD1D) & 0xFFFFFFFFFFFFFFFF
         yield y
+```
+
+示例（SeedSpace + Stream）：
+
+```
+from symbolicplastic_snn.utils.prng import SeedSpace
+
+ss = SeedSpace(run_seed=0x0123456789ABCDEF)
+rng = ss.derive("module=noise", "layer=3", "conn=pre42->post7")
+u = rng.u64()           # uint64
+x = rng.uniform()       # [0,1) 双精度浮点（top-53 bits / 2^53）
+i = rng.randint(0, 10)  # [0,10)
+perm = rng.permutation(16)
+```
+
+命名建议（keys）：
+- 模块：`module=topology`、`module=plasticity`、`module=readout`
+- 层/块/epoch：`layer=2`、`block=7`、`epoch=42`
+- 连接对：`pre=42->post=7` 或 `tile=3` 等
+
+显式禁止：
+- 任何 `numpy.random`、`import random`（已通过测试守卫检查），统一使用 `SeedSpace/Stream`。
 ```
 
 ## 概述
