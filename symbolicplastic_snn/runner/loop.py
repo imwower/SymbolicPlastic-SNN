@@ -595,17 +595,13 @@ class SnnRunner:
         return z.astype(np.uint64)
 
     def _rng_uint16_for_step(self, step: int, size: int) -> np.ndarray:
-        # Vectorized SplitMix64 stream: state_i = seed + INC*(i+1)
-        base = (self._global_seed ^ np.uint64(step) ^ np.uint64(0xD1342543DE82EF95)).astype(np.uint64)
-        idx = np.arange(1, size + 1, dtype=np.uint64)
-        state = (base + idx * self._SPLITMIX64_INC).astype(np.uint64)
-        z = state.copy()
-        z ^= (z >> np.uint64(30))
-        z = (z * self._SPLITMIX64_M1).astype(np.uint64)
-        z ^= (z >> np.uint64(27))
-        z = (z * self._SPLITMIX64_M2).astype(np.uint64)
-        z ^= (z >> np.uint64(31))
-        return ((z >> np.uint64(48)) & np.uint64(0xFFFF)).astype(np.uint16)
+        # Unified PRNG: derive a Step-scoped Stream and draw uint16s via top bits
+        st = self.seed_space.derive("module=encode", "encoder=rate_q016", f"step={int(step)}")
+        n = int(size)
+        out = np.empty(n, dtype=np.uint16)
+        for i in range(n):
+            out[i] = np.uint16((st.u64() >> 48) & 0xFFFF)
+        return out
 
     def _init_seeds_splitmix64(self) -> tuple[np.ndarray, np.ndarray]:
         idx = np.arange(self.N, dtype=np.uint64)
@@ -617,14 +613,21 @@ class SnnRunner:
 
     # ---------------- Input encoding helpers ----------------
     def _encode_input_q016(self, x_t: np.ndarray) -> np.ndarray:
-        # Convert float input to Q0.16 probabilities, then integer Bernoulli via per-step SplitMix64 stream
+        # Convert float input to Q0.16 probabilities, then integer Bernoulli via per-step Stream
         x = np.asarray(x_t, dtype=np.float32)
         # p_float = clip(x * rate_max, 0, 1)
         p = np.clip(x * float(self.cfg.rate_max), 0.0, 1.0)
         # Convert to Q0.16 with rounding
         p_q = np.minimum((p * 65535.0 + 0.5).astype(np.int64), 65535).astype(np.uint16)
-        r = self._rng_uint16_for_step(self._step_index, self.N)
-        mask = rate_encode_q016(p_q, lambda size: r[:size])
+        # Derive step-dedicated RNG and pass as callable
+        st = self.seed_space.derive("module=encode", "encoder=rate_q016", f"step={int(self._step_index)}")
+        def _rng16(sz: int) -> np.ndarray:
+            n = int(sz)
+            out = np.empty(n, dtype=np.uint16)
+            for i in range(n):
+                out[i] = np.uint16((st.u64() >> 48) & 0xFFFF)
+            return out
+        mask = rate_encode_q016(p_q, _rng16)
         return mask.reshape(-1)
 
     # ---------------- Alias helpers ----------------
