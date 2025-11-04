@@ -29,6 +29,7 @@ from symbolicplastic_snn.io.snapshot import (
     load_runner_snapshot,
 )
 from dataclasses import asdict
+from symbolicplastic_snn.utils.prng import SeedSpace
 
 
 @dataclass
@@ -90,6 +91,8 @@ class RunnerConfig:
     demote_corr: int = -10
     flip_sign_pos: int = 20
     flip_sign_neg: int = -20
+    # Unified run seed (used to derive all streams deterministically)
+    run_seed: int = 1234
 
 
 class SnnRunner:
@@ -99,8 +102,10 @@ class SnnRunner:
         self.tile_size = int(self.cfg.tile_size)
         self.N = self.n_tiles * self.tile_size
 
-        # PRNG seed
+        # PRNG seed: prefer explicit seed param for backward compatibility
         self._global_seed = np.uint64(seed)
+        # SeedSpace for modular streams (available to call sites)
+        self.seed_space = SeedSpace(int(self._global_seed))
 
         # State
         self.v = np.zeros(self.N, dtype=np.int16)
@@ -225,6 +230,37 @@ class SnnRunner:
             if spk_idx.size:
                 pre_ids_vec = spk_idx.astype(np.int32)
                 pre_tiles_vec = (pre_ids_vec // self.tile_size).astype(np.int32)
+                # Prepare jitter RNGs derived from SeedSpace per pre neuron and step
+                def _rng16_from_stream(stream):
+                    def rng(size: int):
+                        n = int(size)
+                        out = np.empty(n, dtype=np.uint16)
+                        for i in range(n):
+                            out[i] = np.uint16((stream.u64() >> 48) & 0xFFFF)
+                        return out
+                    return rng
+                rng_core = [
+                    _rng16_from_stream(
+                        self.seed_space.derive(
+                            "module=topology",
+                            f"channel=core",
+                            f"pre={int(pid)}",
+                            f"step={int(self._step_index)}",
+                        )
+                    )
+                    for pid in pre_ids_vec
+                ]
+                rng_exp = [
+                    _rng16_from_stream(
+                        self.seed_space.derive(
+                            "module=topology",
+                            f"channel=explore",
+                            f"pre={int(pid)}",
+                            f"step={int(self._step_index)}",
+                        )
+                    )
+                    for pid in pre_ids_vec
+                ]
                 # Core path
                 if T_core > 0:
                     alias_list_core = [self._get_alias_for(int(t), mode="core") for t in pre_tiles_vec]
@@ -239,6 +275,7 @@ class SnnRunner:
                         seeds=[int(self.seeds_core[int(pid)]) for pid in pre_ids_vec],
                         delay_lut=self.delay_lut,
                         stable_store=self.stable_store,
+                        rng_list=rng_core,
                     )
                     emitted_core += len(pairs_core)
                     for ev, pt in pairs_core:
@@ -259,6 +296,7 @@ class SnnRunner:
                         seeds=[int(self.seeds_flex[int(pid)]) for pid in pre_ids_vec],
                         delay_lut=self.delay_lut,
                         stable_store=self.stable_store,
+                        rng_list=rng_exp,
                     )
                     emitted_explore += len(pairs_exp)
                     for ev, pt in pairs_exp:
