@@ -1,0 +1,33 @@
+time:
+  dt_ms: 1
+  tau_m_ms: 50
+  refractory_ms: 3
+
+topology:
+  K_in: 64
+  EI_ratio: 1.0
+  long_range_ratio: 0.01
+
+readout:
+  window_steps: 50
+
+realtime:
+  budget_per_step: 1024
+  early_exit: false
+
+pipeline:
+  enabled: true
+  period: 2000
+  promote_min_age: 6000
+  promote_min_corr: 25
+  promote_min_hits: 80
+  promote_per_pre_cap: 64
+  demote_age: 8000
+  demote_corr: -10
+  flip_sign_pos: 25
+  flip_sign_neg: -25
+
+plasticity:
+  low_contrib_frac: 0.2
+  reseed_rate: 0.25
+

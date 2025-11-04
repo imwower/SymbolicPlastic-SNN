@@ -168,6 +168,8 @@ class SnnRunner:
         self.hh_maps: dict[int, SpaceSavingK] = {}
         # Pairwise sparse stats
         self._edge_last_seen: dict[tuple[int, int], int] = {}
+        # Accumulated usage counter per (pre_tile, post_id) for promotion age semantics
+        self._edge_age_accum: dict[tuple[int, int], int] = {}
         self._edge_corr_map: dict[tuple[int, int], int] = {}
 
     # ---------------- Runner API ----------------
@@ -285,6 +287,8 @@ class SnnRunner:
                             self._edge_last_seen[key] = step_now
                             # Increment corr proxy by k value
                             self._edge_corr_map[key] = self._edge_corr_map.get(key, 0) + int(ev.k[j])
+                            # Accumulate usage count as age proxy
+                            self._edge_age_accum[key] = self._edge_age_accum.get(key, 0) + int(ev.k[j])
                         off += n
                     _update_edge_usage(pre_buf[:off], post_buf[:off], self.hh_maps, capacity=64)
 
@@ -392,10 +396,8 @@ class SnnRunner:
                 else:
                     reseed_mask = np.zeros(self.N, dtype=bool)
                 # Ages from last seen
-                ages: dict[tuple[int, int], int] = {}
-                now = int(self._step_index)
-                for key, last in self._edge_last_seen.items():
-                    ages[key] = max(0, now - int(last))
+                # Use accumulated usage counts as age proxy
+                ages: dict[tuple[int, int], int] = dict(self._edge_age_accum)
                 pcfg = PromoteConfig(
                     min_age=int(self.cfg.promote_min_age),
                     min_corr=int(self.cfg.promote_min_corr),
@@ -422,6 +424,7 @@ class SnnRunner:
                     reseed_rate=float(self.cfg.reseed_rate),
                     epoch=self._step_index,
                     promote_cfg=pcfg,
+                    demote_ages={k: max(0, int(self._step_index) - v) for k, v in self._edge_last_seen.items()},
                 )
                 # Apply outputs
                 self.alias_corr_prob = pl_out["prob"].astype(np.uint16)

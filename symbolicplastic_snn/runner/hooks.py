@@ -33,6 +33,7 @@ def apply_plasticity_pipeline(
     reseed_rate: float = 0.01,
     epoch: int = 0,
     promote_cfg: PromoteConfig | None = None,
+    demote_ages: Dict[Tuple[int, int], int] | None = None,
 ) -> Dict[str, int | np.ndarray]:
     """Run macro reweight, micro reseed, and consolidation in-order.
 
@@ -59,7 +60,9 @@ def apply_plasticity_pipeline(
     for pre_id, hh in hh_maps.items():
         added = promote_candidates(int(pre_id), hh, corr_map, ages, store, pcfg)
         promoted += len(added)
-    removed = demote_candidates(store, corr_map, ages, pcfg)
+    # Use demote_ages (idle) if provided; else reuse ages (accum)
+    demote_age_map = demote_ages if demote_ages is not None else ages
+    removed = demote_candidates(store, corr_map, demote_age_map, pcfg)
     demoted = len(removed)
     flipped = flip_sign_updates(store, corr_map, pcfg)
 
@@ -73,4 +76,3 @@ def apply_plasticity_pipeline(
 
 
 __all__ = ["apply_plasticity_pipeline"]
-

@@ -438,6 +438,26 @@ python scripts/run_local.py --steps 50000 --config path/to/cfg.yml
 
 脚本会每 500 步输出 periodic_metrics，观察 promoted/demoted/frozen/stable_edges_total 及预算/延后指标；当 `frozen_count` 持续增长时，会附注“固化阶段”，便于观测训练阶段转换。
 
+### 渐进生长示例配置与指标采样
+
+- 提供一份“渐进生长”示例配置：`examples/gradual.yml`（阈值更严格，管道周期更长），目标是在 20k–50k 步内逐步逼近 cap 的 70–90%。
+- 运行 50k 步：
+
+```
+python scripts/run_local.py --steps 50000 --config examples/gradual.yml --seed 4242 --save-prefix checkpoints/gradual
+```
+
+- 提取并查看周期性指标（CSV + ASCII 简图）：
+
+```
+# 将运行输出重定向到日志
+python scripts/run_local.py --steps 50000 --config examples/gradual.yml > run.log
+# 从日志提取 periodic_metrics 为 CSV
+python scripts/collect_metrics.py run.log > metrics.csv
+# 或者打印 ASCII 简图
+python scripts/collect_metrics.py --ascii run.log
+```
+
 
 ## 默认超参速查表
 
