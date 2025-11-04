@@ -734,18 +734,34 @@ class SnnRunner:
             "tile_bw_hist": (self.tile_bw._hist if self.tile_bw._hist is not None else np.zeros(self.n_tiles, dtype=np.uint32)),
             "spike_counts": self.spike_counts,
         }
+        # Readout state arrays (histogram and counts)
+        if hasattr(self.readout, "_hist") and self.readout._hist is not None:
+            arrays["readout_hist"] = self.readout._hist
+        if hasattr(self.readout, "_counts") and self.readout._counts is not None:
+            arrays["readout_counts"] = self.readout._counts
         # Add stable store arrays
         idx, entries = _stable_to_arrays(self.stable_store)
         arrays["stable_index"] = idx
         arrays["stable_entries"] = entries
         # Snapshot PRNG active streams as name->state mapping
         rng_streams = {name: int(stream.get_state()) for name, stream in self._active_streams.items()}
+        # Snapshot time wheel
+        try:
+            wheel_snap = self.wheel.snapshot()
+        except Exception:
+            wheel_snap = {}
         meta = {
             "step_index": int(self._step_index),
             "global_seed": int(self._global_seed),
             "alias_version": int(self._alias_version),
             "config": asdict(self.cfg),
             "rng_streams": rng_streams,
+            "timewheel": wheel_snap,
+            # Readout metadata
+            "readout_ptr": int(getattr(self.readout, "_ptr", 0)),
+            "readout_step_idx": int(getattr(self.readout, "_step_idx", 0)),
+            "readout_latched_idx": (int(self.readout._latched_idx) if self.readout._latched_idx is not None else -1),
+            "readout_latency": (int(self.readout._latency) if self.readout._latency is not None else -1),
         }
         save_runner_snapshot(f"{prefix}_runner.bin", arrays, meta)
 
@@ -760,6 +776,11 @@ class SnnRunner:
         if "tile_bw_hist" in arrays:
             self.tile_bw._hist = arrays["tile_bw_hist"].astype(np.uint32)
         self.spike_counts = arrays.get("spike_counts", np.zeros(self.N, dtype=np.int32)).astype(np.int32)
+        # Restore readout state arrays if present
+        if "readout_hist" in arrays:
+            self.readout._hist = arrays["readout_hist"].astype(np.int32)
+        if "readout_counts" in arrays:
+            self.readout._counts = arrays["readout_counts"].astype(np.int32)
         # Restore stable store if present
         if "stable_index" in arrays and "stable_entries" in arrays:
             self.stable_store = _arrays_to_stable(arrays["stable_index"], arrays["stable_entries"])
@@ -779,6 +800,23 @@ class SnnRunner:
                 s = Stream(1)
                 s.set_state(int(st))
                 self._active_streams[str(name)] = s
+        # Restore time wheel if available
+        tw = meta.get("timewheel", {}) or {}
+        try:
+            if isinstance(tw, dict) and hasattr(self.wheel, "restore"):
+                self.wheel.restore(tw)
+        except Exception:
+            pass
+        # Restore readout metadata
+        try:
+            self.readout._ptr = int(meta.get("readout_ptr", getattr(self.readout, "_ptr", 0)))
+            self.readout._step_idx = int(meta.get("readout_step_idx", getattr(self.readout, "_step_idx", 0)))
+            li = int(meta.get("readout_latched_idx", -1))
+            self.readout._latched_idx = None if li < 0 else li
+            lt = int(meta.get("readout_latency", -1))
+            self.readout._latency = None if lt < 0 else lt
+        except Exception:
+            pass
 
     def run(self, X_T: Iterable[np.ndarray]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         out: Optional[Dict[str, Any]] = None

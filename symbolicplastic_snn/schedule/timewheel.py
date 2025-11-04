@@ -194,6 +194,67 @@ class TimeWheel:
     def tick(self) -> None:
         self._ptr = (self._ptr + 1) % self.slots
 
+    # ---------------- Snapshot/restore ----------------
+    def snapshot(self) -> dict:
+        """Serialize wheel internal state to a JSON-serializable dict.
+
+        Captures pointer and all pending groups in each slot.
+        """
+        snap_groups = []
+        for s_idx, bucket in enumerate(self._buckets):
+            if not bucket:
+                continue
+            for (post_tile, delay), group in bucket.items():
+                g = {
+                    "slot": int(s_idx),
+                    "post_tile": int(post_tile),
+                    "delay": int(delay),
+                    "capped": bool(group["capped"]),
+                    "total_k": int(group["total_k"]),
+                }
+                if not group["capped"]:
+                    g["idx"] = group["idx"].astype(int).tolist()
+                    g["k"] = group["k"].astype(int).tolist()
+                else:
+                    g["idx"] = []
+                    g["k"] = []
+                snap_groups.append(g)
+        return {
+            "slots": int(self.slots),
+            "ptr": int(self._ptr),
+            "groups": snap_groups,
+        }
+
+    def restore(self, snap: dict) -> None:
+        """Restore wheel state from a dict created by snapshot()."""
+        if not isinstance(snap, dict):
+            raise ValueError("Invalid snapshot for TimeWheel")
+        slots = int(snap.get("slots", self.slots))
+        ptr = int(snap.get("ptr", 0))
+        groups = snap.get("groups", []) or []
+        if slots != self.slots:
+            # Reinitialize buckets with new slot count if mismatched
+            self.slots = slots
+            self._buckets = [dict() for _ in range(self.slots)]
+        else:
+            # Clear existing
+            self._buckets = [dict() for _ in range(self.slots)]
+        self._ptr = ptr % self.slots
+        self._bytes_used = 0
+        for g in groups:
+            s_idx = int(g.get("slot", 0)) % self.slots
+            key = (int(g.get("post_tile", 0)), int(g.get("delay", 0)))
+            capped = bool(g.get("capped", False))
+            total_k = np.int64(int(g.get("total_k", 0)))
+            if capped:
+                group = {"idx": np.empty((0,), dtype=np.int32), "k": np.empty((0,), dtype=np.int16), "capped": True, "total_k": total_k}
+            else:
+                idx = np.asarray(g.get("idx", []), dtype=np.int32)
+                kk = np.asarray(g.get("k", []), dtype=np.int16)
+                group = {"idx": idx, "k": kk, "capped": False, "total_k": total_k}
+                self._bytes_used += idx.nbytes + kk.nbytes
+            self._buckets[s_idx][key] = group
+
     # ---------------- Internal helpers ----------------
     def _would_exceed_cap(self, diff_bytes: int) -> bool:
         if self._bytes_cap is None:
