@@ -105,6 +105,7 @@ perm = rng.permutation(16)
 ## 快速开始
 
 - 环境：Python 3.11 + NumPy（纯 CPU）。
+- 安装依赖：`pip install -r requirements.txt`
 - 运行全部测试：`python -m unittest -v`（仓库根目录）。
 - 运行指定测试：`python -m unittest tests/test_simulator.py -v`。
 - 使用 `pytest`（可选）：`pytest -q` 或 `pytest tests/test_simulator.py -q`。
@@ -122,6 +123,32 @@ perm = rng.permutation(16)
 - `symbolicplastic_snn/runner` 端到端 Runner
 
 示例导入：`from symbolicplastic_snn.runner.loop import SnnRunner, RunnerConfig`
+
+PRNG 导入路径说明：
+- 推荐直接使用 `symbolicplastic_snn.core.prng`（权威实现）。
+- `symbolicplastic_snn.utils.prng` 为等价别名（re-export），二者对象完全一致。
+  - 示例：`from symbolicplastic_snn.core.prng import SeedSpace` 或 `from symbolicplastic_snn.utils.prng import SeedSpace` 均可。
+
+输入编码（Encoders）：
+- 速率泊松编码 PoissonRateEncoder（确定性）：
+  - 适合将连续强度转为逐步伯努利脉冲；键派生：`("module=encode", f"trial={t}", f"tile={i}")`。
+  - 示例：
+    ```python
+    from symbolicplastic_snn.encode import PoissonRateEncoder
+    from symbolicplastic_snn.core.prng import SeedSpace
+    N, T = 128, 100
+    enc = PoissonRateEncoder(rate=0.2*np.ones(N), T=T)
+    spikes = enc.encode(SeedSpace(1234), trial=0)   # (T, N) int8 in {0,1}
+    ```
+- 名次‑潜伏期编码 LatencyRankEncoder：
+  - 强度越大触发越早；并列由 Stream 打破平局；每神经元每窗仅 1 次脉冲。
+  - 示例：
+    ```python
+    from symbolicplastic_snn.encode import LatencyRankEncoder
+    from symbolicplastic_snn.core.prng import FloatRng
+    x = FloatRng(0).random(N, dtype=np.float32)
+    lat = LatencyRankEncoder(window=16).encode(x, SeedSpace(1234), trial=0)
+    ```
 
 注：仓库根下的 `core/`、`topology/`、`readout/`、`monitor/` 等为过渡期兼容包装，建议迁移到 `symbolicplastic_snn/*` 新路径。
 

@@ -18,7 +18,7 @@ class ReadoutConfig:
 
 
 class Readout:
-    """Sliding-window spike count readout with optional early-exit.
+    """Sliding-window spike count readout with optional early-exit and WTA.
 
     - Channels are added via add_channel(name, neuron_ids)
     - step(spike_mask) updates per-channel counts in a rolling window
@@ -80,8 +80,8 @@ class Readout:
 
         # Optional WTA: channels with count >= threshold inhibit others in this step
         if self.cfg.wta:
-            thr = int(self.cfg.wta_threshold)
-            inh = int(self.cfg.wta_inhibit)
+            thr = max(0, int(self.cfg.wta_threshold))
+            inh = max(0, int(self.cfg.wta_inhibit))
             winners = np.nonzero(step_counts >= thr)[0]
             if winners.size > 0 and inh > 0:
                 # Total inhibition proportional to sum of winners' counts

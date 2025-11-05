@@ -140,3 +140,104 @@ def ratio_norm(x: float, lo: float, hi: float) -> np.uint16:
 
 
 __all__.extend(["constant_q16", "piecewise_linear", "poisson_spikes", "ratio_norm"])
+
+
+# ---- High-level encoders (deterministic via SeedSpace/Stream) ----
+
+class PoissonRateEncoder:
+    """Bernoulli spike encoder from rates using deterministic Stream.
+
+    - rate: array of shape (N,) or scalar; values are per-step probabilities in [0,1].
+    - T: total steps to generate.
+    - key_prefix: SeedSpace key prefix used to derive stream.
+    - clip: optional (lo, hi) to clip rate before sampling.
+
+    Example
+    >>> from symbolicplastic_snn.core.prng import SeedSpace
+    >>> enc = PoissonRateEncoder(rate=0.2, T=4)
+    >>> out = enc.encode(SeedSpace(1234), trial=0)
+    >>> out.shape
+    (4, 1)
+    """
+
+    def __init__(self, rate: np.ndarray | float, T: int, key_prefix: str = "module=encode", clip: tuple[float, float] | None = None) -> None:
+        self.T = int(T)
+        self.key_prefix = str(key_prefix)
+        self.clip = clip
+        self._rate = rate
+
+    def encode(self, seed_space, trial: int, tile: int | None = None) -> np.ndarray:
+        from symbolicplastic_snn.core.prng import SeedSpace, Stream  # type: ignore
+
+        if isinstance(self._rate, np.ndarray):
+            r = np.asarray(self._rate, dtype=np.float32).reshape(-1)
+        else:
+            r = np.array([float(self._rate)], dtype=np.float32)
+        if self.clip is not None:
+            lo, hi = float(self.clip[0]), float(self.clip[1])
+            r = np.clip(r, lo, hi)
+        r = np.clip(r, 0.0, 1.0)
+
+        keys = [self.key_prefix, f"trial={int(trial)}"]
+        if tile is not None:
+            keys.append(f"tile={int(tile)}")
+        st = seed_space.derive(*keys)
+
+        T, N = self.T, int(r.size)
+        out = np.zeros((T, N), dtype=np.int8)
+        # Draw T*N uniforms deterministically
+        for t in range(T):
+            for i in range(N):
+                out[t, i] = 1 if st.uniform() < float(r[i]) else 0
+        return out
+
+
+class LatencyRankEncoder:
+    """Latency encoder: earlier time for stronger intensity with deterministic tie-breaks.
+
+    - window: number of time steps [1..]
+    - key_prefix: SeedSpace key prefix used to derive stream for tie-breaking.
+
+    Each neuron spikes exactly once within the `window`. If N > window,
+    ranks wrap around with modulo (rank % window).
+
+    Example
+    >>> from symbolicplastic_snn.core.prng import SeedSpace
+    >>> enc = LatencyRankEncoder(window=4)
+    >>> x = np.array([0.8, 0.1, 0.8], dtype=np.float32)
+    >>> out = enc.encode(x, SeedSpace(0), trial=0)
+    >>> out.sum(axis=0).tolist()
+    [1, 1, 1]
+    """
+
+    def __init__(self, window: int, key_prefix: str = "module=encode") -> None:
+        self.window = max(1, int(window))
+        self.key_prefix = str(key_prefix)
+
+    def encode(self, intensities: np.ndarray, seed_space, trial: int) -> np.ndarray:
+        x = np.asarray(intensities, dtype=np.float32).reshape(-1)
+        N = int(x.size)
+
+        # Group indices by intensity value for stable tie-breaks
+        vals = {}
+        for i, v in enumerate(x.tolist()):
+            vals.setdefault(float(v), []).append(i)
+
+        # Derive tie-break RNG once per trial
+        st = seed_space.derive(self.key_prefix, f"trial={int(trial)}")
+
+        order: list[int] = []
+        # Sort intensities descending, then shuffle equal-value groups
+        for v in sorted(vals.keys(), reverse=True):
+            grp = vals[v]
+            # Deterministic shuffle via Stream
+            a = np.array(grp, dtype=np.int64)
+            st.shuffle(a)
+            order.extend(a.astype(int).tolist())
+
+        # Map rank to time t in [0, window-1] with wrap-around
+        out = np.zeros((self.window, N), dtype=np.int8)
+        for rank, idx in enumerate(order):
+            t = rank % self.window
+            out[t, int(idx)] = 1
+        return out
