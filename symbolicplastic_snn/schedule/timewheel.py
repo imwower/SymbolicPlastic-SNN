@@ -78,7 +78,7 @@ class TimeWheel:
     - All operations are stable and deterministic.
     """
 
-    def __init__(self, slots: int, bytes_cap: int | None = None) -> None:
+    def __init__(self, slots: int, bytes_cap: int | None = None, max_bucket_size: int | None = None, drop_policy: str = "drop_new") -> None:
         if slots <= 0:
             raise ValueError("slots must be positive")
         self.slots = int(slots)
@@ -89,6 +89,12 @@ class TimeWheel:
         self._buckets: List[Dict[Tuple[int, int], dict]] = [dict() for _ in range(self.slots)]
         self._bytes_cap = bytes_cap if bytes_cap is None else int(bytes_cap)
         self._bytes_used = 0  # only counts ndarray buffer bytes of indices/k
+        # Capacity and drop policy for number of groups per slot
+        self._max_bucket_size = None if max_bucket_size is None else int(max_bucket_size)
+        if drop_policy not in ("drop_oldest", "drop_new", "raise"):
+            raise ValueError("drop_policy must be 'drop_oldest'|'drop_new'|'raise'")
+        self._drop_policy = drop_policy
+        self._seq = 0  # stable insertion sequence per group for drop_oldest
 
     # ---------------- Public API ----------------
     def push(self, event: BlockEvent) -> None:
@@ -104,13 +110,36 @@ class TimeWheel:
 
         group = bucket.get(key)
         if group is None:
+            # Enforce per-slot capacity at group creation time
+            if self._max_bucket_size is not None and len(bucket) >= int(self._max_bucket_size):
+                if self._drop_policy == "drop_new":
+                    return
+                if self._drop_policy == "raise":
+                    raise RuntimeError("TimeWheel bucket capacity exceeded")
+                # drop_oldest: remove the group with smallest seq
+                if bucket:
+                    # find oldest by stored seq
+                    oldest_key = None
+                    oldest_seq = None
+                    for k2, g2 in bucket.items():
+                        s2 = int(g2.get("_seq", 0))
+                        if oldest_seq is None or s2 < oldest_seq:
+                            oldest_seq = s2
+                            oldest_key = k2
+                    if oldest_key is not None:
+                        g_old = bucket.pop(oldest_key)
+                        # adjust bytes_used if removing fine-grained
+                        if not g_old.get("capped", False):
+                            self._bytes_used -= (g_old["idx"].nbytes + g_old["k"].nbytes)
             group = {
                 "idx": np.empty((0,), dtype=np.int32),
                 "k": np.empty((0,), dtype=np.int16),
                 "capped": False,
                 "total_k": np.int64(0),
+                "_seq": int(self._seq),
             }
             bucket[key] = group
+            self._seq += 1
 
         if group["capped"]:
             # Already coarse; accumulate total strength only
@@ -192,7 +221,10 @@ class TimeWheel:
         return out
 
     def tick(self) -> None:
+        before = self._ptr
         self._ptr = (self._ptr + 1) % self.slots
+        # Basic wrap-around sanity: only advance by 1 mod slots
+        assert ((before + 1) % self.slots) == self._ptr
 
     # ---------------- Snapshot/restore ----------------
     def snapshot(self) -> dict:

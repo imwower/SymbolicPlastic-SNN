@@ -152,6 +152,32 @@ PRNG 导入路径说明：
 
 注：仓库根下的 `core/`、`topology/`、`readout/`、`monitor/` 等为过渡期兼容包装，建议迁移到 `symbolicplastic_snn/*` 新路径。
 
+## 快照版本与字节序（Snapshot Header）
+
+- 文件头：`MAGIC(8B) + version(u16) + endianness(u8) + reserved(5B) + meta_len(u64) + meta(JSON)`。
+- `endianness`: 0=小端，1=大端；当前实现仅在与主机字节序一致时读回（不做跨字节序自动转换）。
+- `meta.segments[*]` 中包含 `dtype/shape/strides` 以便校验/调试。
+- 兼容性：读取时同时支持旧版头（legacy: MAGIC + meta_len + meta），写入统一使用新版本头。
+
+## 拓扑指标（Topology Metrics）
+
+模块 `symbolicplastic_snn/topology/metrics.py` 提供纯 NumPy 近似指标：
+- `degree_hist(adj)`：入/出度直方图；`inout_invariants(adj)`：N、M 与统计量；
+- `avg_path_len_approx(adj, k)`：平均最短路径近似；
+- `clustering_coeff_approx(adj, k)`：聚类系数近似（按无向处理）；
+- `small_worldness(adj, samples)`：`σ ≈ (C/Cr) / (L/Lr)`（ER 近似）。
+
+## PRNG 跨语言黄金（Golden Vectors）
+
+- 生成脚本：`python scripts/gen_prng_golden.py` 会写入 `docs/prng_golden.json`。
+- 内容：多组 `(run_seed, keys[])` → 前 8 个 `u64`，前 4 个 `uniform()`，以及 `permutation(16)`。
+- 测试：`tests/test_prng_golden_json.py` 会读取 JSON 并与本地实现逐项比对。
+
+## 最小端到端示例
+
+- 直接运行：`PYTHONPATH=. python examples/e2e_tiny.py`。
+- 输出：每 16 步打印一次关键指标；在 `examples/out/` 下保存 `v.npy/ref.npy/alias_corr_prob.npy`。
+
 ## 数学模型（离散 LIF + 不应期 + 延迟）
 
 记膜电位 `v_i(t)`，脉冲指示 `s_i(t) ∈ {0,1}`，不应期计数 `ref_i(t)`，连接符号 `a_ij ∈ {−1,+1}`，传输延迟 `d_ij ≥ 1`，泄露系数 `lambda ∈ (0,1)`：

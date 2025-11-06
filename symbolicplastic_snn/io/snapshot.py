@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import json
+import struct
 from typing import Any, Dict, Tuple
 
 import numpy as np
 
 
-MAGIC = b"SPSNNSNP"
+MAGIC = b"SPSNNSNP"  # 8 bytes
+SNAP_VERSION = 2  # bump to 2 for versioned header with endianness
+
+# Endianness flag encoding for header (data arrays are written in native endian)
+# 0 = little-endian host, 1 = big-endian host
+_HOST_ENDIAN_FLAG = 0 if np.little_endian else 1
 
 
 def _dtype_str(dt: np.dtype) -> str:
@@ -16,6 +22,53 @@ def _dtype_str(dt: np.dtype) -> str:
 
 def _nbytes(shape: tuple[int, ...], dtype: np.dtype) -> int:
     return int(np.prod(shape)) * np.dtype(dtype).itemsize
+
+
+def _pack_header_v2(meta_json: bytes) -> bytes:
+    """Build a V2 header: MAGIC + version(u16) + endian(u8) + reserved(5B) + meta_len(u64) + meta_json."""
+    version = SNAP_VERSION
+    endian = _HOST_ENDIAN_FLAG
+    reserved = b"\x00" * 5
+    meta_len = len(meta_json)
+    # Header fixed fields are stored in little-endian for portability
+    fixed = MAGIC + struct.pack("<H B 5s Q", version, endian, reserved, meta_len)
+    return fixed + meta_json
+
+
+def _try_parse_header(f) -> tuple[int, int, bytes]:
+    """Read header prefix and return (version, endian_flag, meta_json).
+
+    Supports both V1 (legacy) and V2 (versioned) headers.
+    """
+    # Read MAGIC
+    magic = f.read(len(MAGIC))
+    if magic != MAGIC:
+        raise ValueError("Invalid snapshot magic header")
+
+    # Peek next 2+1+5+8 bytes to detect V2; if not plausible, treat as V1
+    peek = f.read(2 + 1 + 5 + 8)
+    if len(peek) < (2 + 1 + 5 + 8):
+        raise ValueError("Corrupt snapshot header (truncated)")
+    try:
+        ver, endian_flag, _reserved, meta_len = struct.unpack("<H B 5s Q", peek)
+        # V2 plausibility: small integer version and endian_flag in {0,1}
+        if 1 <= ver <= 0x00FF and endian_flag in (0, 1):
+            meta_json = f.read(meta_len)
+            if len(meta_json) != meta_len:
+                raise ValueError("Corrupt snapshot: meta length mismatch")
+            return ver, endian_flag, meta_json
+        # Else fall through to V1 path
+    except Exception:
+        # Fall back to V1 path
+        pass
+
+    # Legacy V1 header: after MAGIC comes meta_len (u64 little-endian) + meta_json
+    # Re-interpret `peek` bytes as beginning of meta_len
+    meta_len = struct.unpack("<Q", peek[:8])[0]
+    meta_json = f.read(meta_len)
+    if len(meta_json) != meta_len:
+        raise ValueError("Corrupt snapshot (legacy): meta length mismatch")
+    return 1, _HOST_ENDIAN_FLAG, meta_json
 
 
 def save_snapshot(
@@ -46,12 +99,26 @@ def save_snapshot(
 
     # Build metadata without offsets first
     meta = {
-        "version": 1,
+        "version": SNAP_VERSION,
         "segments": segments,
         "rng_state": rng_state,
     }
+    # Include strides metadata for validation/debugging
+    for seg in segments:
+        name = seg["name"]
+        if name == "v":
+            seg["strides"] = list(v.strides)
+        elif name == "ref":
+            seg["strides"] = list(ref.strides)
+        elif name == "seeds":
+            seg["strides"] = list(seeds.strides)
+        elif name == "alias_prob":
+            seg["strides"] = list(prob.strides)
+        elif name == "alias_alias":
+            seg["strides"] = list(alias_idx.strides)
+
     meta_json = json.dumps(meta, separators=(",", ":")).encode("utf-8")
-    header = MAGIC + int.to_bytes(len(meta_json), 8, "little") + meta_json
+    header = _pack_header_v2(meta_json)
 
     # Compute sizes
     sizes = [
@@ -64,7 +131,7 @@ def save_snapshot(
 
     # Finalize header without offsets (offsets are derived during read)
     meta_json = json.dumps(meta, separators=(",", ":")).encode("utf-8")
-    header = MAGIC + int.to_bytes(len(meta_json), 8, "little") + meta_json
+    header = _pack_header_v2(meta_json)
 
     # Prepare file of the correct size
     total_size = len(header) + sum(sizes)
@@ -91,17 +158,19 @@ def load_snapshot(path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[s
     Returns (v:int16, ref:uint8, seeds:uint64, alias:dict, rng_state:dict)
     """
     with open(path, "rb") as f:
-        magic = f.read(len(MAGIC))
-        if magic != MAGIC:
-            raise ValueError("Invalid snapshot magic header")
-        meta_len = int.from_bytes(f.read(8), "little")
-        meta_json = f.read(meta_len)
+        ver, endian_flag, meta_json = _try_parse_header(f)
+    if endian_flag != _HOST_ENDIAN_FLAG:
+        raise ValueError(f"Snapshot endianness mismatch: file={endian_flag} host={_HOST_ENDIAN_FLAG}")
     meta = json.loads(meta_json.decode("utf-8"))
 
     segs = meta["segments"]
     loaded: Dict[str, np.ndarray] = {}
     # Data starts after header
-    header_len = len(MAGIC) + 8 + len(json.dumps(meta, separators=(",", ":")).encode("utf-8"))
+    # Compute header length depending on version
+    if int(meta.get("version", 1)) >= 2:
+        header_len = len(MAGIC) + 2 + 1 + 5 + 8 + len(meta_json)
+    else:
+        header_len = len(MAGIC) + 8 + len(meta_json)
     off = header_len
     for seg in segs:
         name = seg["name"]
@@ -133,9 +202,18 @@ def save_runner_snapshot(path: str, arrays: Dict[str, np.ndarray], meta: Dict[st
         {"name": name, "dtype": _dtype_str(arr.dtype), "shape": list(arr.shape)}
         for name, arr in arrays.items()
     ]
-    hdr = {"version": 1, "segments": segments, "meta": meta}
+    # Enrich segments with strides info for validation
+    seg_meta = []
+    for name, arr in arrays.items():
+        seg_meta.append({
+            "name": name,
+            "dtype": _dtype_str(arr.dtype),
+            "shape": list(arr.shape),
+            "strides": list(arr.strides),
+        })
+    hdr = {"version": SNAP_VERSION, "segments": seg_meta, "meta": meta, "endian": _HOST_ENDIAN_FLAG}
     meta_json = json.dumps(hdr, separators=(",", ":")).encode("utf-8")
-    header = MAGIC + int.to_bytes(len(meta_json), 8, "little") + meta_json
+    header = _pack_header_v2(meta_json)
 
     # Compute sizes and offsets sequentially
     sizes = [_nbytes(tuple(arr.shape), arr.dtype) for arr in arrays.values()]
@@ -162,16 +240,17 @@ def save_runner_snapshot(path: str, arrays: Dict[str, np.ndarray], meta: Dict[st
 def load_runner_snapshot(path: str) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
     """Load arrays and metadata from a runner snapshot created by save_runner_snapshot."""
     with open(path, "rb") as f:
-        magic = f.read(len(MAGIC))
-        if magic != MAGIC:
-            raise ValueError("Invalid snapshot magic header")
-        meta_len = int.from_bytes(f.read(8), "little")
-        meta_json = f.read(meta_len)
+        ver, endian_flag, meta_json = _try_parse_header(f)
+    if endian_flag != _HOST_ENDIAN_FLAG:
+        raise ValueError(f"Snapshot endianness mismatch: file={endian_flag} host={_HOST_ENDIAN_FLAG}")
     hdr = json.loads(meta_json.decode("utf-8"))
     segs = hdr["segments"]
     arrays: Dict[str, np.ndarray] = {}
     # Offsets derive from header length + previous sizes
-    header_len = len(MAGIC) + 8 + len(meta_json)
+    if int(hdr.get("version", 1)) >= 2:
+        header_len = len(MAGIC) + 2 + 1 + 5 + 8 + len(meta_json)
+    else:
+        header_len = len(MAGIC) + 8 + len(meta_json)
     off = header_len
     for seg in segs:
         name = str(seg["name"])

@@ -787,6 +787,11 @@ class SnnRunner:
         # Restore counters and seeds
         self._step_index = int(meta.get("step_index", self._step_index))
         self._global_seed = np.uint64(int(meta.get("global_seed", int(self._global_seed))))
+        # Rebuild SeedSpace to reflect restored global seed
+        try:
+            self.seed_space = SeedSpace(int(self._global_seed))
+        except Exception:
+            pass
         self._alias_version = int(meta.get("alias_version", self._alias_version + 1))
         # Invalidate caches to rebuild lazily
         self._alias_cache_core.clear()
@@ -800,6 +805,12 @@ class SnnRunner:
                 s = Stream(1)
                 s.set_state(int(st))
                 self._active_streams[str(name)] = s
+        # Reattach readout tie RNG if present to ensure identical sequence
+        try:
+            if "readout:tie" in self._active_streams:
+                self.readout.set_tie_rng(self._active_streams["readout:tie"])  # type: ignore[arg-type]
+        except Exception:
+            pass
         # Restore time wheel if available
         tw = meta.get("timewheel", {}) or {}
         try:
