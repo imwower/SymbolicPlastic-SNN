@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
+from typing import Optional
 
 import numpy as np
 
@@ -46,6 +48,7 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=1234, help="Run seed for inputs and runner")
     ap.add_argument("--bytes-cap", type=int, default=2_147_483_648, help="TimeWheel bytes cap (e.g., 2 GiB)")
     ap.add_argument("--period", type=int, default=500, help="Metrics print period")
+    ap.add_argument("--csv-out", type=str, default=None, help="Optional path to write periodic metrics as CSV")
     # Optional overrides for development/smoke runs
     ap.add_argument("--n-tiles", type=int, default=None, help="Override number of tiles (default 64)")
     ap.add_argument("--tile-size", type=int, default=None, help="Override tile size (default 32768)")
@@ -66,6 +69,23 @@ def main() -> None:
     runner.wheel = TimeWheel(slots=rc.slots, bytes_cap=int(args.bytes_cap))
 
     rng = FloatRng(args.seed)
+
+    # Optional CSV writer for periodic metrics
+    csv_writer: Optional[csv.DictWriter] = None
+    csv_file = None
+    if args.csv_out:
+        csv_file = open(args.csv_out, "w", newline="", encoding="utf-8")
+        fields = [
+            "step",
+            "N",
+            "used_budget_ratio",
+            "deferred_events",
+            "emitted_core_events",
+            "emitted_explore_events",
+        ]
+        csv_writer = csv.DictWriter(csv_file, fieldnames=fields)
+        csv_writer.writeheader()
+
     for t in range(int(args.steps)):
         # Deterministic [0,1) float input per step
         x = rng.random(runner.N, dtype=np.float32)
@@ -74,20 +94,25 @@ def main() -> None:
 
         if (t + 1) % int(args.period) == 0:
             m = runner.last_metrics or {}
-            print(
-                json.dumps(
-                    {
-                        "step": t + 1,
-                        "N": int(runner.N),
-                        "used_budget_ratio": float(m.get("used_budget_ratio", m.get("budget_used_ratio", 0.0))),
-                        "deferred_events": int(m.get("deferred_events", m.get("deferred_count", 0))),
-                        "emitted_core_events": int(m.get("emitted_core_events", 0)),
-                        "emitted_explore_events": int(m.get("emitted_explore_events", 0)),
-                    }
-                )
-            )
+            row = {
+                "step": t + 1,
+                "N": int(runner.N),
+                "used_budget_ratio": float(m.get("used_budget_ratio", m.get("budget_used_ratio", 0.0))),
+                "deferred_events": int(m.get("deferred_events", m.get("deferred_count", 0))),
+                "emitted_core_events": int(m.get("emitted_core_events", 0)),
+                "emitted_explore_events": int(m.get("emitted_explore_events", 0)),
+            }
+            # Stream JSONL for live monitoring
+            print(json.dumps(row), flush=True)
+            # Also write CSV if enabled
+            if csv_writer is not None:
+                csv_writer.writerow(row)
+                csv_file.flush()
 
-    print(json.dumps({"done": True, "steps": int(args.steps), "N": int(runner.N)}))
+    print(json.dumps({"done": True, "steps": int(args.steps), "N": int(runner.N)}), flush=True)
+
+    if csv_file is not None:
+        csv_file.close()
 
 
 if __name__ == "__main__":
